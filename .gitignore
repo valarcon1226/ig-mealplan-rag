@@ -1,0 +1,11 @@
+node_modules/
+.env
+dist/
+build/
+backend/venv/
+backend/__pycache__/
+*.sqlite
+*.db
+backend/recipes.db
+backend/recetas_saludables_backup.json
+.DS_Store

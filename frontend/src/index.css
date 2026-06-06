@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+@theme {
+  --color-neutral-950: #0a0a0a;
+  --color-neutral-900: #171717;
+  --color-neutral-800: #262626;
+  --color-neutral-700: #404040;
+  --color-neutral-500: #737373;
+}
+
+/* DatePicker Dark Mode Overrides */
+.react-datepicker {
+  background-color: var(--color-neutral-900) !important;
+  border-color: var(--color-neutral-800) !important;
+  font-family: inherit !important;
+  color: white !important;
+}
+.react-datepicker__header {
+  background-color: var(--color-neutral-950) !important;
+  border-color: var(--color-neutral-800) !important;
+}
+.react-datepicker__current-month, .react-datepicker-time__header, .react-datepicker-year-header {
+  color: white !important;
+}
+.react-datepicker__day-name, .react-datepicker__day, .react-datepicker__time-name {
+  color: var(--color-neutral-400, #a3a3a3) !important;
+}
+.react-datepicker__day:hover, .react-datepicker__month-text:hover, .react-datepicker__quarter-text:hover, .react-datepicker__year-text:hover {
+  background-color: var(--color-neutral-800) !important;
+}
+.react-datepicker__day--selected, .react-datepicker__day--in-selecting-range, .react-datepicker__day--in-range {
+  background-color: #f97316 !important; /* orange-500 */
+  color: white !important;
+}
+.react-datepicker__day--keyboard-selected {
+  background-color: var(--color-neutral-800) !important;
+  color: white !important;
+}
+.react-datepicker-popper[data-placement^=bottom] .react-datepicker__triangle::before, .react-datepicker-popper[data-placement^=bottom] .react-datepicker__triangle::after {
+  border-bottom-color: var(--color-neutral-950) !important;
+}
+.react-datepicker-popper[data-placement^=top] .react-datepicker__triangle::before, .react-datepicker-popper[data-placement^=top] .react-datepicker__triangle::after {
+  border-top-color: var(--color-neutral-900) !important;
+}
+.react-datepicker-wrapper {
+  width: 100%;
+}

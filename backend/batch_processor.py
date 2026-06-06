@@ -1,7 +1,7 @@
 import json
 import time
 import os
-from langchain_pipeline import analyze_recipe_with_langchain, load_recipes_db, save_recipes_db
+from langchain_pipeline import run_recipe_pipeline, load_recipes_db, save_recipes_db
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,6 +20,14 @@ def main():
     db = load_recipes_db()
     unanalyzed = [p for p in posts if p.get("media_id", p.get("id")) not in db]
     print(f"Remaining to analyze: {len(unanalyzed)}")
+
+    # Limitar a la mitad para no gastar todos los tokens
+    if len(unanalyzed) > 0:
+        limit = len(unanalyzed) // 2
+        # Si de casualidad solo queda 1, procesamos ese 1 en lugar de 0
+        limit = max(limit, 1)
+        unanalyzed = unanalyzed[:limit]
+        print(f"Limiting this run to process: {len(unanalyzed)} recipes")
 
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
@@ -45,7 +53,14 @@ def main():
         retries = 0
         while not success and retries < 5:
             try:
-                recipe = analyze_recipe_with_langchain(inputs, gemini_key)
+                recipe = run_recipe_pipeline(
+                    media_id=media_id,
+                    video_url=inputs["video_url"],
+                    gemini_api_key=gemini_key,
+                    target_servings=0,
+                    save_to_db=False,
+                    caption=inputs["caption"]
+                )
                 
                 # Recargar BD para no pisar si el usuario está usando la app
                 db = load_recipes_db() 

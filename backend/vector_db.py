@@ -59,9 +59,10 @@ def load_recipes_data() -> List[Dict[str, Any]]:
     for post in posts:
         ai_analysis = post.get("ai_analysis", {})
         if ai_analysis and ai_analysis.get("is_recipe"):
-            # Ensure it has an ID, fallback to media_id if not present
-            if not ai_analysis.get("id"):
-                ai_analysis["id"] = ai_analysis.get("media_id", post.get("media_id"))
+            # Ensure it has an ID, force it to be post.get("media_id") to match SQLite
+            ai_analysis["id"] = post.get("media_id")
+            if not ai_analysis["id"]:
+                continue
             recipes_list.append(ai_analysis)
     
     print(f"Loaded {len(recipes_list)} recipes from database.")

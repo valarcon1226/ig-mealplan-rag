@@ -1,6 +1,8 @@
 import { useStore } from '../lib/store';
-import { Flame, Target, Utensils, Activity } from 'lucide-react';
+import { Flame, Target, Utensils, Activity, HeartPulse } from 'lucide-react';
 import { useState } from 'react';
+import { getPregnancyWeeks } from '../lib/macroCalculator';
+import toast from 'react-hot-toast';
 
 const getCyclePhase = (dateStr?: string) => {
   if (!dateStr) return 'none';
@@ -23,7 +25,7 @@ export default function Dashboard() {
   const [isSyncingGarmin, setIsSyncingGarmin] = useState(false);
 
   const syncGarmin = async () => {
-    if (!profile.garminConnected || !profile.garminCredentials) return alert("Not connected to Garmin");
+    if (!profile.garminConnected || !profile.garminCredentials) return toast.error("Not connected to Garmin");
     setIsSyncingGarmin(true);
     try {
        const today = new Date().toISOString().split('T')[0];
@@ -43,15 +45,15 @@ export default function Dashboard() {
           const activeCal = data.summary.activeKilocalories || data.summary.wellnessActiveKilocalories || 0;
           if (activeCal > 0) {
              updateDailyConsumption({ caloriesBurned: activeCal });
-             alert(`Synced ${activeCal} active calories from Garmin for today!`);
+             toast.success(`Synced ${activeCal} active calories from Garmin!`);
           } else {
-             alert("Garmin synced, but 0 active calories today.");
+             toast("Garmin synced, but 0 active calories today.", { icon: 'ℹ️' });
           }
        } else {
-          alert("Could not fetch Garmin summary.");
+          toast.error("Could not fetch Garmin summary.");
        }
     } catch (err: any) {
-       alert("Error syncing with Garmin APIs");
+       toast.error("Error syncing with Garmin APIs");
     } finally {
        setIsSyncingGarmin(false);
     }
@@ -62,6 +64,9 @@ export default function Dashboard() {
     if (!isNaN(val) && val > 0) {
       updateDailyConsumption({ caloriesBurned: dailyConsumption.caloriesBurned + val });
       setBurnedInput('');
+      toast.success(`Added ${val} burned calories`);
+    } else {
+      toast.error("Enter a valid number");
     }
   };
 
@@ -110,27 +115,34 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 bg-neutral-950 p-2 rounded-xl border border-neutral-800">
-          <input
-            type="number"
-            value={burnedInput}
-            onChange={(e) => setBurnedInput(e.target.value)}
-            placeholder="Burned kcal?"
-            className="bg-transparent flex-1 text-sm outline-none px-3 text-white placeholder:text-neutral-600 w-24"
-          />
-          <button 
-            onClick={addBurnedCalories}
-            className="bg-orange-500 text-black px-4 py-2 rounded-lg text-sm font-bold shadow-lg shadow-orange-500/20"
-          >
-            Add
-          </button>
+        <div className="flex flex-col gap-3 mt-2">
+          <div className="flex items-center gap-2 bg-neutral-950 p-1.5 rounded-xl border border-neutral-800">
+            <input
+              type="number"
+              value={burnedInput}
+              onChange={(e) => setBurnedInput(e.target.value)}
+              placeholder="Ej. 300 kcal"
+              className="bg-transparent flex-1 text-sm outline-none px-3 text-white placeholder:text-neutral-600"
+            />
+            <button 
+              onClick={addBurnedCalories}
+              className="bg-neutral-800 hover:bg-neutral-700 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors"
+            >
+              Add Manual
+            </button>
+          </div>
+          
           {profile.garminConnected && (
             <button 
               onClick={syncGarmin}
               disabled={isSyncingGarmin}
-              className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-3 py-2 rounded-lg text-sm font-bold"
+              className="w-full flex justify-center items-center gap-2 bg-blue-600/10 border border-blue-500/20 hover:bg-blue-600/20 disabled:opacity-50 text-blue-400 px-4 py-3 rounded-xl text-sm font-bold transition-colors"
             >
-              {isSyncingGarmin ? '...' : <Activity className="w-5 h-5"/>}
+              {isSyncingGarmin ? (
+                <>Syncing...</>
+              ) : (
+                <><Activity className="w-4 h-4"/> Sync Garmin Connect</>
+              )}
             </button>
           )}
         </div>
@@ -155,19 +167,39 @@ export default function Dashboard() {
         </div>
       </section>
 
-      {getCyclePhase(profile.lastPeriodStart) !== 'none' && (
-        <section className="bg-orange-500/10 text-orange-400 border border-orange-500/20 rounded-2xl p-5 mb-8 flex gap-4">
-          <Activity className="w-6 h-6 shrink-0 mt-0.5" />
-          <div>
-            <h3 className="font-bold mb-1 capitalize">{getCyclePhase(profile.lastPeriodStart)} Phase</h3>
-            <p className="text-sm opacity-80 leading-relaxed text-orange-200">
-              {getCyclePhase(profile.lastPeriodStart) === 'luteal' && "Your body might crave more energy. Prioritize complex carbs and slightly sweeter healthy treats."}
-              {getCyclePhase(profile.lastPeriodStart) === 'menstrual' && "Focus on iron-rich foods, anti-inflammatory ingredients, and hydration."}
-              {getCyclePhase(profile.lastPeriodStart) === 'follicular' && "Energy levels are rising. Fresh, light, and protein-forward meals are great right now."}
-              {getCyclePhase(profile.lastPeriodStart) === 'ovulation' && "Peak energy. Great time for high-intensity workouts and balanced lighter meals."}
-            </p>
-          </div>
-        </section>
+      {profile.isPregnant ? (
+        (() => {
+          const pregnancyInfo = getPregnancyWeeks(profile.pregnancyDueDate);
+          if (!pregnancyInfo) return null;
+          return (
+            <section className="bg-orange-500/10 text-orange-400 border border-orange-500/20 rounded-2xl p-5 mb-8 flex gap-4">
+              <HeartPulse className="w-6 h-6 shrink-0 mt-0.5" />
+              <div>
+                <h3 className="font-bold mb-1">Semana {pregnancyInfo.week} - Trimestre {pregnancyInfo.trimester}</h3>
+                <p className="text-sm opacity-80 leading-relaxed text-orange-200">
+                  {pregnancyInfo.trimester === 1 && "Trimestre 1: Tus requerimientos calóricos base no aumentan, pero prioriza ácido fólico y mantén la hidratación."}
+                  {pregnancyInfo.trimester === 2 && "Trimestre 2: El bebé crece rápido. Tus calorías y proteínas han sido ajustadas. Asegúrate de comer grasas saludables para el desarrollo cerebral."}
+                  {pregnancyInfo.trimester === 3 && "Trimestre 3: Máxima demanda energética. Come pequeñas porciones más seguido si tienes saciedad temprana. Tus calorías están al máximo."}
+                </p>
+              </div>
+            </section>
+          )
+        })()
+      ) : (
+        getCyclePhase(profile.lastPeriodStart) !== 'none' && (
+          <section className="bg-orange-500/10 text-orange-400 border border-orange-500/20 rounded-2xl p-5 mb-8 flex gap-4">
+            <Activity className="w-6 h-6 shrink-0 mt-0.5" />
+            <div>
+              <h3 className="font-bold mb-1 capitalize">{getCyclePhase(profile.lastPeriodStart)} Phase</h3>
+              <p className="text-sm opacity-80 leading-relaxed text-orange-200">
+                {getCyclePhase(profile.lastPeriodStart) === 'luteal' && "Your body might crave more energy. Prioritize complex carbs and slightly sweeter healthy treats."}
+                {getCyclePhase(profile.lastPeriodStart) === 'menstrual' && "Focus on iron-rich foods, anti-inflammatory ingredients, and hydration."}
+                {getCyclePhase(profile.lastPeriodStart) === 'follicular' && "Energy levels are rising. Fresh, light, and protein-forward meals are great right now."}
+                {getCyclePhase(profile.lastPeriodStart) === 'ovulation' && "Peak energy. Great time for high-intensity workouts and balanced lighter meals."}
+              </p>
+            </div>
+          </section>
+        )
       )}
     </div>
   );

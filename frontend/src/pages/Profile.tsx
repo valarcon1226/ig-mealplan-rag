@@ -4,9 +4,10 @@ import { Settings, RefreshCw, UserCircle, ActivitySquare, Link2, Calendar, Heart
 import { calculateMacros, getCyclePhase } from '../lib/macroCalculator';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
+import toast from 'react-hot-toast';
 
 export default function Profile() {
-  const { profile, updateProfile } = useStore();
+  const { profile, updateProfile, loadFromCloud } = useStore();
   const [loading, setLoading] = useState(false);
   const [showStaticDataModal, setShowStaticDataModal] = useState(false);
   const [macroSuccess, setMacroSuccess] = useState(false);
@@ -36,7 +37,7 @@ export default function Profile() {
 
   const saveN8n = () => {
     updateProfile({ n8nWebhookUrl: n8n });
-    alert("Saved");
+    toast.success("Saved");
   }
 
   const handleIgLogin = async (e: React.FormEvent) => {
@@ -53,6 +54,7 @@ export default function Profile() {
       localStorage.setItem('ig_username', igUsername);
       localStorage.setItem('ig_password', igPassword || 'dummy');
       updateProfile({ instagramApiKey: JSON.stringify({ username: igUsername, password: igPassword || 'dummy' }) });
+      await loadFromCloud(igUsername);
       setShowIgModal(false);
     } catch (e) {
        setIgError("Network error. Please try again later.");
@@ -63,7 +65,7 @@ export default function Profile() {
 
   const handleGarminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!garminUser || !garminPassword) return alert("Enter Garmin credentials");
+    if (!garminUser || !garminPassword) return toast.error("Enter Garmin credentials");
     setGarminLoading(true);
     
     try {
@@ -80,12 +82,12 @@ export default function Profile() {
           garminCredentials: { user: garminUser, pass: garminPassword, displayName: data.displayName }
         });
         setShowGarminModal(false);
-        alert(`Connected to Garmin as ${data.displayName}!`);
+        toast.success(`Connected to Garmin as ${data.displayName}!`);
       } else {
-        alert(data.error || "Garmin login failed");
+        toast.error(data.error || "Garmin login failed");
       }
     } catch (err: any) {
-       alert("Error connecting to Garmin");
+       toast.error("Error connecting to Garmin");
     } finally {
        setGarminLoading(false);
     }
@@ -118,8 +120,9 @@ export default function Profile() {
       }
       setIgFolders(fetchedFolders);
       updateProfile({ igFolders: fetchedFolders });
+      toast.success("Folders synced!");
     } catch (err: any) {
-      alert(err.message || 'Error fetching folders.');
+      toast.error(err.message || 'Error fetching folders.');
     } finally {
       setIgFoldersLoading(false);
     }
@@ -433,7 +436,18 @@ export default function Profile() {
 
               <div className="space-y-1">
                 <label className="text-xs text-neutral-500 block">Goal</label>
-                <select value={profile.goal || ''} onChange={e => handleProfileChange({ goal: e.target.value as any })} className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white outline-none">
+                <select 
+                  value={profile.goal || ''} 
+                  onChange={e => {
+                    const newGoal = e.target.value as any;
+                    if (profile.isPregnant && newGoal === 'lose') {
+                      const confirmDeficit = window.confirm("No es recomendable hacer déficit en embarazo, ¿quieres continuar de todos modos?");
+                      if (!confirmDeficit) return;
+                    }
+                    handleProfileChange({ goal: newGoal });
+                  }} 
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white outline-none"
+                >
                   <option value="" disabled>Select</option>
                   <option value="lose">Lose Weight (Deficit)</option>
                   <option value="maintain">Maintain Weight</option>
@@ -449,59 +463,142 @@ export default function Profile() {
         </div>
       )}
 
-      {/* Cycle Sync */}
+      {/* Cycle Sync & Pregnancy */}
       <section className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6">
-        <h2 className="font-bold text-lg mb-4 flex items-center gap-2"><ActivitySquare className="w-5 h-5 text-orange-500" /> Cycle Sync (Optional)</h2>
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="font-bold text-lg flex items-center gap-2">
+            <ActivitySquare className="w-5 h-5 text-orange-500" /> 
+            {profile.isPregnant ? "Pregnancy Mode" : "Cycle Sync"}
+          </h2>
+          {profile.gender === 'female' && (
+            <label className="flex items-center cursor-pointer relative">
+              <input 
+                type="checkbox" 
+                className="sr-only" 
+                checked={profile.isPregnant || false}
+                onChange={(e) => {
+                   const isPreg = e.target.checked;
+                   handleProfileChange({ 
+                     isPregnant: isPreg, 
+                     goal: isPreg ? 'maintain' : profile.goal 
+                   });
+                }}
+              />
+              <div className={`w-10 h-5 rounded-full shadow-inner transition-colors ${profile.isPregnant ? 'bg-orange-500' : 'bg-neutral-800'}`}></div>
+              <div className={`absolute left-0.5 top-0.5 bg-white w-4 h-4 rounded-full shadow transition-transform ${profile.isPregnant ? 'translate-x-5' : ''}`}></div>
+              <span className="ml-2 text-xs font-bold text-neutral-400">Embarazada</span>
+            </label>
+          )}
+        </div>
+
         {profile.gender === 'female' ? (
           <>
-            <p className="text-xs text-neutral-400 mb-4 leading-relaxed">Enter the start date of your last period. The AI will adapt your meal plan suggestions based on your current cycle phase.</p>
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs font-bold text-neutral-400 block mb-2">Last Period Start Date</label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                    <Calendar className="h-4 w-4 text-neutral-500" />
-                  </div>
-                  <DatePicker
-                    selected={profile.lastPeriodStart ? new Date(profile.lastPeriodStart + 'T12:00:00Z') : null}
-                    onChange={(date: Date | null) => {
-                      if (date) {
-                        const yyyy = date.getFullYear();
-                        const mm = String(date.getMonth() + 1).padStart(2, '0');
-                        const dd = String(date.getDate()).padStart(2, '0');
-                        handleProfileChange({ lastPeriodStart: `${yyyy}-${mm}-${dd}` });
-                      } else {
-                         handleProfileChange({ lastPeriodStart: undefined });
-                      }
-                    }}
-                    dateFormat="yyyy-MM-dd"
-                    className="w-full bg-neutral-950 border border-neutral-800 rounded-lg pl-10 pr-3 py-3 text-sm outline-none text-white focus:border-orange-500 cursor-pointer"
-                    placeholderText="Select a date"
-                    maxDate={new Date()}
-                  />
-                </div>
-              </div>
-              {profile.lastPeriodStart && (
-                (() => {
-                  const cycleInfo = getCyclePhase(profile.lastPeriodStart);
-                  if (!cycleInfo) return null;
-                  
-                  return (
-                    <div className="space-y-3">
-                      <div className="bg-orange-500/10 text-orange-400 border border-orange-500/20 p-3 rounded-lg text-sm flex justify-between items-center">
-                        <span><strong>Fase actual:</strong> {cycleInfo.phase} (Día {cycleInfo.day})</span>
-                        {cycleInfo.isLate && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded font-bold">Retraso</span>}
+            {profile.isPregnant ? (
+               <div className="space-y-4">
+                 <div className="grid grid-cols-2 gap-4">
+                   <div>
+                     <label className="text-xs font-bold text-neutral-400 block mb-2">Peso Pre-Embarazo (kg)</label>
+                     <input 
+                       type="number" 
+                       value={profile.prePregnancyWeight || profile.currentWeight || ''} 
+                       onChange={e => handleProfileChange({ prePregnancyWeight: parseFloat(e.target.value) || undefined })} 
+                       className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-3 text-sm text-white focus:border-orange-500 outline-none" 
+                     />
+                   </div>
+                   <div>
+                     <label className="text-xs font-bold text-neutral-400 block mb-2">Fecha Probable de Parto</label>
+                     <div className="relative">
+                       <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                         <Calendar className="h-4 w-4 text-neutral-500" />
+                       </div>
+                       <DatePicker
+                         selected={profile.pregnancyDueDate ? new Date(profile.pregnancyDueDate + 'T12:00:00Z') : null}
+                         onChange={(date: Date | null) => {
+                           if (date) {
+                             const yyyy = date.getFullYear();
+                             const mm = String(date.getMonth() + 1).padStart(2, '0');
+                             const dd = String(date.getDate()).padStart(2, '0');
+                             handleProfileChange({ pregnancyDueDate: `${yyyy}-${mm}-${dd}` });
+                           } else {
+                              handleProfileChange({ pregnancyDueDate: undefined });
+                           }
+                         }}
+                         dateFormat="yyyy-MM-dd"
+                         className="w-full bg-neutral-950 border border-neutral-800 rounded-lg pl-10 pr-3 py-3 text-sm outline-none text-white focus:border-orange-500 cursor-pointer"
+                         placeholderText="Due Date"
+                         minDate={new Date()}
+                       />
+                     </div>
+                   </div>
+                 </div>
+
+                 {profile.pregnancyDueDate && (
+                   <div className="bg-orange-500/10 text-orange-400 border border-orange-500/20 p-4 rounded-xl mt-4">
+                     <p className="text-xs font-bold uppercase tracking-wider mb-2 flex items-center gap-1">
+                       <HeartPulse className="w-4 h-4" /> Alertas Nutricionales Clínicas
+                     </p>
+                     <ul className="text-xs space-y-2 list-disc pl-4 mt-2">
+                       <li><strong>Ácido Fólico:</strong> Toma 400-600mcg diarios.</li>
+                       <li><strong>Hierro & Calcio:</strong> Aumenta la ingesta de hierro (27mg) y calcio (1000mg).</li>
+                       <li><strong>DHA:</strong> Consume mínimo 200mg de Omega-3 para el desarrollo cerebral.</li>
+                       <li className="text-red-400 font-bold">Prohibido crudos (sushi, tartar) y lácteos no pasteurizados.</li>
+                       <li>Límite de cafeína: 200mg/día.</li>
+                     </ul>
+                   </div>
+                 )}
+               </div>
+            ) : (
+              <>
+                <p className="text-xs text-neutral-400 mb-4 leading-relaxed">Enter the start date of your last period. The AI will adapt your meal plan suggestions based on your current cycle phase.</p>
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-xs font-bold text-neutral-400 block mb-2">Last Period Start Date</label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <Calendar className="h-4 w-4 text-neutral-500" />
                       </div>
-                      {cycleInfo.isLate && (
-                        <div className="bg-red-500/10 text-red-400 border border-red-500/20 p-3 rounded-lg text-xs font-bold flex items-center gap-2">
-                          <RefreshCw className="w-4 h-4 shrink-0" /> ¡Tu ciclo ha superado los 28 días! Sigues en fase Lútea. Si ya inició tu nuevo ciclo, actualiza la fecha arriba.
-                        </div>
-                      )}
+                      <DatePicker
+                        selected={profile.lastPeriodStart ? new Date(profile.lastPeriodStart + 'T12:00:00Z') : null}
+                        onChange={(date: Date | null) => {
+                          if (date) {
+                            const yyyy = date.getFullYear();
+                            const mm = String(date.getMonth() + 1).padStart(2, '0');
+                            const dd = String(date.getDate()).padStart(2, '0');
+                            handleProfileChange({ lastPeriodStart: `${yyyy}-${mm}-${dd}` });
+                          } else {
+                             handleProfileChange({ lastPeriodStart: undefined });
+                          }
+                        }}
+                        dateFormat="yyyy-MM-dd"
+                        className="w-full bg-neutral-950 border border-neutral-800 rounded-lg pl-10 pr-3 py-3 text-sm outline-none text-white focus:border-orange-500 cursor-pointer"
+                        placeholderText="Select a date"
+                        maxDate={new Date()}
+                      />
                     </div>
-                  );
-                })()
-              )}
-            </div>
+                  </div>
+                  {profile.lastPeriodStart && (
+                    (() => {
+                      const cycleInfo = getCyclePhase(profile.lastPeriodStart);
+                      if (!cycleInfo) return null;
+                      
+                      return (
+                        <div className="space-y-3">
+                          <div className="bg-orange-500/10 text-orange-400 border border-orange-500/20 p-3 rounded-lg text-sm flex justify-between items-center">
+                            <span><strong>Fase actual:</strong> {cycleInfo.phase} (Día {cycleInfo.day})</span>
+                            {cycleInfo.isLate && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded font-bold">Retraso</span>}
+                          </div>
+                          {cycleInfo.isLate && (
+                            <div className="bg-red-500/10 text-red-400 border border-red-500/20 p-3 rounded-lg text-xs font-bold flex items-center gap-2">
+                              <RefreshCw className="w-4 h-4 shrink-0" /> ¡Tu ciclo ha superado los 28 días! Sigues en fase Lútea. Si ya inició tu nuevo ciclo, actualiza la fecha arriba.
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()
+                  )}
+                </div>
+              </>
+            )}
           </>
         ) : (
           <p className="text-xs text-neutral-400 leading-relaxed bg-neutral-950 p-4 rounded-xl border border-neutral-800">
@@ -522,7 +619,7 @@ export default function Profile() {
             
             <div className="space-y-3">
               <button 
-                onClick={() => alert("Apple Health connection coming soon!")}
+                onClick={() => toast("Apple Health connection coming soon!", { icon: '🍎' })}
                 className="w-full flex items-center justify-between p-3 rounded-xl bg-neutral-950 border border-neutral-800 hover:border-neutral-700 transition-colors text-left"
               >
                 <div className="font-bold text-sm text-white">Apple Health</div>
@@ -530,7 +627,7 @@ export default function Profile() {
               </button>
 
               <button 
-                onClick={() => alert("Samsung Health connection coming soon!")}
+                onClick={() => toast("Samsung Health connection coming soon!", { icon: '📱' })}
                 className="w-full flex items-center justify-between p-3 rounded-xl bg-neutral-950 border border-neutral-800 hover:border-neutral-700 transition-colors text-left"
               >
                 <div className="font-bold text-sm text-white">Samsung Health</div>
@@ -553,7 +650,7 @@ export default function Profile() {
               </button>
 
               <button 
-                onClick={() => alert("Other devices coming soon!")}
+                onClick={() => toast("Other devices coming soon!", { icon: '⌚' })}
                 className="w-full flex items-center justify-between p-3 rounded-xl bg-neutral-950 border border-neutral-800 hover:border-neutral-700 transition-colors text-left"
               >
                 <div className="font-bold text-sm text-white">Other Device</div>

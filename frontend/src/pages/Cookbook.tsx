@@ -4,7 +4,7 @@ import { Search, Plus, RefreshCw } from 'lucide-react';
 import { Recipe } from '../lib/types';
 
 export default function Cookbook() {
-  const { recipes, updateDailyConsumption, dailyConsumption, addRecipe, updateRecipe } = useStore();
+  const { recipes, updateDailyConsumption, dailyConsumption, addRecipe, updateRecipe, setAllRecipes } = useStore();
   const [search, setSearch] = useState('');
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
@@ -23,17 +23,23 @@ export default function Cookbook() {
           // Assuming backend returns an array of recipes
           const backendRecipes = Array.isArray(data) ? data : data.recipes || [];
           
-          // Add or update recipes
-          const currentIds = new Set(recipes.map(r => r.id));
+          // Instead of looping (which causes closure stale state bugs), 
+          // we merge local and backend, and set them all at once.
+          const localRecipes = [...recipes];
+          const currentIds = new Set(localRecipes.map(r => String(r.id)));
+          
           for (const newRecipe of backendRecipes) {
+            newRecipe.id = String(newRecipe.id); // Ensure string ID
             if (newRecipe.macros) {
               if (!currentIds.has(newRecipe.id)) {
-                addRecipe({ ...newRecipe, id: newRecipe.id || crypto.randomUUID() });
+                localRecipes.push({ ...newRecipe, id: newRecipe.id || crypto.randomUUID() });
               } else {
-                updateRecipe(newRecipe.id, newRecipe);
+                const index = localRecipes.findIndex(r => String(r.id) === newRecipe.id);
+                localRecipes[index] = { ...localRecipes[index], ...newRecipe };
               }
             }
           }
+          setAllRecipes(localRecipes);
         }
       } catch (err) {
         console.error("Error fetching recipes from ngrok:", err);
@@ -70,7 +76,7 @@ export default function Cookbook() {
       }
 
       return true;
-    });
+    }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   }, [recipes, search, selectedTags]);
 
   const eatRecipe = (recipe: Recipe) => {
@@ -102,18 +108,7 @@ export default function Cookbook() {
           />
         </div>
         
-        <div className="flex flex-wrap gap-2 pb-2 mt-4">
-          {allTags.map(tag => (
-            <button 
-              key={tag}
-              onClick={() => toggleTag(tag)}
-              className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-colors border ${selectedTags.includes(tag) ? 'bg-orange-500 text-black border-orange-500' : 'bg-neutral-900 text-neutral-400 border-neutral-800'}`}
-            >
-              #{tag}
-            </button>
-          ))}
-          {allTags.length === 0 && <span className="text-xs text-neutral-600">No tags found. Add recipes first.</span>}
-        </div>
+
       </header>
 
       {filteredRecipes.length === 0 ? (
@@ -144,10 +139,7 @@ export default function Cookbook() {
                 </div>
               )}
               <h3 className="font-bold text-sm leading-tight mb-2">{recipe.title}</h3>
-              <div className="flex flex-wrap gap-1 mb-4">
-                {recipe.categories.slice(0, 3).map(c => <span key={c} className="text-[10px] bg-neutral-800 px-2 py-0.5 rounded text-neutral-400">#{c.toLowerCase()}</span>)}
-                {recipe.categories.length > 3 && <span className="text-[10px] text-neutral-500">+{recipe.categories.length - 3}</span>}
-              </div>
+
               <div className="flex justify-between items-end mt-auto pt-2 border-t border-neutral-800">
                 <div className="text-xs font-mono text-neutral-500">
                   <span className="text-orange-400 font-bold">{recipe.macros.calories}</span> kcal

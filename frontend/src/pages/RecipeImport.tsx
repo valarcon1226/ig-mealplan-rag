@@ -10,7 +10,7 @@ export default function RecipeImport() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState<'single' | 'bulk'>('single');
+  const [activeTab, setActiveTab] = useState<'single' | 'bulk'>(folderPosts.length > 0 ? 'bulk' : 'single');
   const [folderName, setFolderName] = useState('');
   const [visibleCount, setVisibleCount] = useState(13);
 
@@ -107,7 +107,7 @@ export default function RecipeImport() {
       
       const baseUrl = "/api";
       const url = folderName 
-          ? `${baseUrl}/collection-posts/all?collection_id=${folderName}&since=0`
+          ? `${baseUrl}/collection-posts?collection_id=${folderName}&since=0`
           : `${baseUrl}/saved-posts?limit=20`;
 
       const igRes = await fetch(url, {
@@ -128,12 +128,15 @@ export default function RecipeImport() {
         throw new Error('No saved items found in this collection.');
       }
 
-      const normalizedItems = items.map((item: any) => ({
-        ...item,
-        id: item.id || item.media_id || item.pk,
-        imageUrl: item.imageUrl || (item.media_type !== 'video' ? item.url : null) || item.thumbnail_url,
-        videoUrl: item.videoUrl || (item.media_type === 'video' ? item.url : null)
-      }));
+      const normalizedItems = items.map((item: any) => {
+        const id = item.id || item.media_id || item.pk;
+        return {
+          ...item,
+          id,
+          imageUrl: `/api/static/thumbnails/${id}.png`,
+          videoUrl: item.videoUrl || (item.media_type === 'video' ? item.url : null)
+        };
+      });
 
       setFolderPosts(normalizedItems);
     } catch (err: any) {
@@ -300,16 +303,6 @@ export default function RecipeImport() {
                   <div className="space-y-4">
                     {folderPosts.slice(0, visibleCount).map((post: any) => (
                       <div key={post.id} className="bg-neutral-950 border border-neutral-800 p-3 rounded-xl flex gap-4 overflow-hidden">
-                        {(post.imageUrl || post.videoUrl) ? (
-                           <div className="w-20 h-20 shrink-0 bg-neutral-900 rounded-lg overflow-hidden flex items-center justify-center relative">
-                             {post.videoUrl && <Video className="absolute inset-0 m-auto w-6 h-6 text-white drop-shadow-md z-10" />}
-                             <img src={post.imageUrl || post.videoUrl} alt="Post Thumbnail" className="w-full h-full object-cover opacity-80" referrerPolicy="no-referrer" />
-                           </div>
-                        ) : (
-                           <div className="w-20 h-20 shrink-0 bg-neutral-900 rounded-lg flex items-center justify-center">
-                             <ImageIcon className="w-6 h-6 text-neutral-600" />
-                           </div>
-                        )}
                         <div className="flex-1 min-w-0 flex flex-col justify-between">
                           <p className="text-xs text-neutral-400 line-clamp-2 leading-relaxed mb-2">{post.caption}</p>
                           <button

@@ -13,7 +13,7 @@ const upload = multer({ dest: '/tmp/' });
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = 4000;
 
   app.use(express.json());
 
@@ -24,8 +24,8 @@ async function startServer() {
       const { username, password } = req.body;
       const { GarminConnect } = await import("garmin-connect");
       
-      const gc = new GarminConnect();
-      await gc.login(username, password);
+      const gc = new GarminConnect({ username, password });
+      await gc.login();
       
       const profile = await gc.getUserProfile();
       
@@ -42,8 +42,8 @@ async function startServer() {
       if (!username || !password) return res.status(400).json({ error: "Missing Garmin credentials" });
       
       const { GarminConnect } = await import("garmin-connect");
-      const gc = new GarminConnect();
-      await gc.login(username, password);
+      const gc = new GarminConnect({ username, password });
+      await gc.login();
       
       const profile = await gc.getUserProfile();
       // Use internal .get method to fetch the summary
@@ -178,7 +178,7 @@ async function startServer() {
   app.get("/api/recipes", async (req, res) => {
     try {
       const vpsUrl = "http://127.0.0.1:8001";
-      const response = await fetch(`${vpsUrl}/recipes`, {
+      const response = await fetch(`${vpsUrl}/api/recipes`, {
         method: "GET",
         headers: {
           "ngrok-skip-browser-warning": "true"
@@ -192,6 +192,28 @@ async function startServer() {
     } catch (error: any) {
       console.error("Recipes Error:", error);
       res.status(500).json({ error: "Failed to fetch recipes: " + error.message });
+    }
+  });
+
+  app.post("/api/mealplan/generate", async (req, res) => {
+    try {
+      const vpsUrl = "http://127.0.0.1:8001";
+      const response = await fetch(`${vpsUrl}/api/mealplan/generate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "ngrok-skip-browser-warning": "true"
+        },
+        body: JSON.stringify(req.body)
+      });
+      if (!response.ok) {
+        throw new Error("Failed to reach FastAPI mealplan generator.");
+      }
+      const data = await response.json();
+      return res.json(data);
+    } catch (error: any) {
+      console.error("Mealplan Error:", error);
+      res.status(500).json({ error: "Failed to generate plan: " + error.message });
     }
   });
 
@@ -409,9 +431,13 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+  
+  // Increase timeouts for long-running Gemini API requests
+  server.keepAliveTimeout = 300000;
+  server.headersTimeout = 305000;
 }
 
 startServer();

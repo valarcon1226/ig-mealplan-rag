@@ -8,6 +8,7 @@ import Profile from './pages/Profile';
 import RecipeImport from './pages/RecipeImport';
 import { Home, Book, Calendar, User, PlusCircle } from 'lucide-react';
 import { cn } from './lib/cn';
+import { Toaster } from 'react-hot-toast';
 
 function Navigation() {
   const location = useLocation();
@@ -58,6 +59,7 @@ function PwaLayout({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-black text-neutral-100 font-sans pb-20">
       {children}
       <Navigation />
+      <Toaster position="bottom-center" toastOptions={{ style: { background: '#171717', color: '#fff', border: '1px solid #262626' } }} />
     </div>
   );
 }

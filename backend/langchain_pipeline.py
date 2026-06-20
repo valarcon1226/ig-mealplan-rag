@@ -132,11 +132,8 @@ def extract_text_from_media(inputs: dict) -> dict:
     if is_image:
         # Imagen: usar inline_data con base64
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://www.instagram.com/"
-            }
-            img_bytes = req_lib.get(video_url, timeout=30, headers=headers).content
+            from ig_downloader import get_ig_image_bytes
+            img_bytes = get_ig_image_bytes(media_id)
             img_b64 = base64.b64encode(img_bytes).decode()
             payload = {
                 "contents": [{
@@ -147,40 +144,61 @@ def extract_text_from_media(inputs: dict) -> dict:
                 }]
             }
             resp = _gemini_post_raw(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={gemini_api_key}",
                 payload
             )
             raw_text = resp["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
+            caption = inputs.get("caption", "")
+            if caption:
+                # Fallback to using just the caption since the image URL expired
+                return {
+                    "raw_text": caption,
+                    "media_id": media_id,
+                    "video_url": video_url,
+                    "gemini_api_key": gemini_api_key,
+                }
             raise RuntimeError(f"Error extrayendo texto de imagen: {str(e)}")
 
     else:
         # Video: descargar y subir a Gemini Files API
         tmp_path = None
         try:
-            # Descargar video
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://www.instagram.com/",
-                "Accept": "*/*",
-            }
-            
-            for attempt in range(3):
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                tmp_path = tmp.name
+                
+            downloaded = False
+            if video_url:
                 try:
-                    r = req_lib.get(video_url, timeout=120, stream=True, headers=headers)
-                    r.raise_for_status()
-                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            if chunk:
-                                tmp.write(chunk)
-                        tmp_path = tmp.name
-                    break  # Éxito, salir del loop
+                    # Download directly from URL
+                    resp = req_lib.get(video_url, timeout=30, stream=True)
+                    if resp.status_code == 200:
+                        with open(tmp_path, 'wb') as f:
+                            for chunk in resp.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                        downloaded = True
+                        print("Downloaded video directly from URL!")
+                    else:
+                        print(f"Failed to download from URL, status code: {resp.status_code}")
                 except Exception as e:
-                    if attempt == 2:
-                        raise RuntimeError(f"Fallo al descargar video tras 3 intentos: {str(e)}")
-                    time.sleep(2)
+                    print(f"Error downloading from URL: {e}")
+            
+            if not downloaded:
+                print("Falling back to yt-dlp...")
+                # Descargar video usando ig_downloader
+                from ig_downloader import download_ig_video
+                for attempt in range(3):
+                    try:
+                        download_ig_video(media_id, tmp_path)
+                        downloaded = True
+                        break  # Éxito, salir del loop
+                    except Exception as e:
+                        if attempt == 2:
+                            raise RuntimeError(f"Fallo al descargar video tras 3 intentos: {str(e)}")
+                        time.sleep(2)
 
             # Subir a Gemini Files API
+            print("Uploading to Gemini Files API...")
             upload_url = (
                 f"https://generativelanguage.googleapis.com/upload/v1beta/files"
                 f"?uploadType=multipart&key={gemini_api_key}"
@@ -205,8 +223,10 @@ def extract_text_from_media(inputs: dict) -> dict:
             upload_resp.raise_for_status()
             file_uri = upload_resp.json()["file"]["uri"]
             file_name = upload_resp.json()["file"]["name"]
+            print(f"Uploaded! file_name: {file_name}")
 
             # Esperar a que Gemini procese el video (estado ACTIVE)
+            print("Waiting for video processing...")
             for _ in range(12):
                 time.sleep(5)
                 try:
@@ -214,28 +234,48 @@ def extract_text_from_media(inputs: dict) -> dict:
                         f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={gemini_api_key}",
                         timeout=30
                     )
-                    if status_resp.ok and status_resp.json().get("state") == "ACTIVE":
+                    state = status_resp.json().get("state")
+                    print(f"Video state: {state}")
+                    if status_resp.ok and state == "ACTIVE":
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error checking status: {e}")
 
             # Llamar a generateContent con el video subido
+            print("Calling generateContent...")
             payload = {
                 "contents": [{
                     "parts": [
                         {"file_data": {"mime_type": "video/mp4", "file_uri": file_uri}},
-                        {"text": EXTRACTION_PROMPT}
+                        {"text": EXTRACTION_PROMPT + " También, identifica en qué segundo exacto (timestamp en formato decimal, ej 3.5) se ve el plato terminado en su mejor presentación. Inclúyelo al final de tu respuesta en este formato exacto: [TIMESTAMP: 3.5]"}
                     ]
                 }]
             }
             resp = _gemini_post_raw(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_api_key}",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={gemini_api_key}",
                 payload,
                 timeout=60
             )
+            print("generateContent successful!")
             raw_text = resp["candidates"][0]["content"]["parts"][0]["text"]
+            
+            # Extraer frame usando cv2 antes de borrar el video
+            print("Extracting frame...")
+            try:
+                import re
+                match = re.search(r'\[TIMESTAMP:\s*([\d\.]+)\]', raw_text)
+                if match:
+                    timestamp = float(match.group(1))
+                    print(f"Found timestamp: {timestamp}")
+                    from video_utils import extract_end_frame
+                    extract_end_frame(None, media_id, local_video_path=tmp_path, target_timestamp=timestamp)
+                else:
+                    print("No timestamp found in response")
+            except Exception as cv_err:
+                print("Error extracting frame from Gemini timestamp:", cv_err)
 
         except Exception as e:
+            print("Exception in extract_text_from_media:", str(e))
             caption = inputs.get("caption", "")
             if caption:
                 # Fallback to using just the caption since the video URL expired
@@ -308,7 +348,7 @@ def structure_recipe(inputs: dict) -> dict:
         }
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-flash-lite-latest",
         google_api_key=gemini_api_key,
         temperature=0.0,
     )
@@ -405,7 +445,7 @@ def calculate_nutrition(inputs: dict) -> dict:
         target_servings = porciones_originales
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model="gemini-flash-lite-latest",
         google_api_key=gemini_api_key,
         temperature=0.0,
     )

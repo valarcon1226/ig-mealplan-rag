@@ -45,4 +45,8 @@ export type UserProfile = {
   streakDays: number;
   lastActiveDate: string; // YYYY-MM-DD
   geminiApiKey?: string;
+  isPregnant?: boolean;
+  prePregnancyWeight?: number;
+  pregnancyDueDate?: string;
+  igUsername?: string;
 };

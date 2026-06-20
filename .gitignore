@@ -9,3 +9,4 @@ backend/__pycache__/
 backend/recipes.db
 backend/recetas_saludables_backup.json
 .DS_Store
+backend/chroma_db/

@@ -5,6 +5,8 @@ import { format } from 'date-fns';
 
 type StoreContextType = {
   recipes: Recipe[];
+  setAllRecipes: (recipes: Recipe[]) => void;
+  setRecipes: (recipes: Recipe[]) => void;
   addRecipe: (recipe: Recipe) => void;
   deleteRecipe: (id: string) => void;
   updateRecipe: (id: string, updates: Partial<Recipe>) => void;
@@ -15,6 +17,8 @@ type StoreContextType = {
   folderPosts: any[];
   setFolderPosts: (posts: any[]) => void;
   isLoading: boolean;
+  loadFromCloud: (username: string) => Promise<void>;
+  syncToCloud: () => Promise<void>;
 };
 
 const defaultProfile: UserProfile = {
@@ -36,6 +40,44 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   });
   const [folderPosts, setFolderPosts] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  const triggerSync = (currentProfile: UserProfile, currentRecipes: Recipe[]) => {
+    if (!currentProfile.igUsername) return;
+    fetch('/api/sync-user-data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: currentProfile.igUsername,
+        profile: currentProfile,
+        recipes: currentRecipes
+      })
+    }).catch(err => console.error('Cloud sync failed:', err));
+  };
+
+  const loadFromCloud = async (username: string) => {
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/api/get-user-data/${username}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status === 'success' && data.data) {
+          const loadedProfile = { ...data.data.profile, igUsername: username };
+          setProfile(loadedProfile);
+          set('app_profile', loadedProfile);
+          
+          setRecipes(data.data.recipes || []);
+          set('app_recipes', data.data.recipes || []);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load from cloud', e);
+    }
+    setIsLoading(false);
+  };
+
+  const syncToCloud = async () => {
+    triggerSync(profile, recipes);
+  };
 
   useEffect(() => {
     const loadData = async () => {
@@ -73,28 +115,39 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     loadData();
   }, []);
 
+
+  const setAllRecipes = (newRecipes: Recipe[]) => {
+    setRecipes(newRecipes);
+    set('app_recipes', newRecipes);
+    triggerSync(profile, newRecipes);
+  };
+
   const addRecipe = (recipe: Recipe) => {
     const newRecipes = [...recipes, recipe];
     setRecipes(newRecipes);
     set('app_recipes', newRecipes);
+    triggerSync(profile, newRecipes);
   };
 
   const deleteRecipe = (id: string) => {
     const newRecipes = recipes.filter(r => r.id !== id);
     setRecipes(newRecipes);
     set('app_recipes', newRecipes);
+    triggerSync(profile, newRecipes);
   };
 
   const updateRecipe = (id: string, updates: Partial<Recipe>) => {
     const newRecipes = recipes.map(r => r.id === id ? { ...r, ...updates } : r);
     setRecipes(newRecipes);
     set('app_recipes', newRecipes);
+    triggerSync(profile, newRecipes);
   };
 
   const updateProfile = (updates: Partial<UserProfile>) => {
     const newProfile = { ...profile, ...updates };
     setProfile(newProfile);
     set('app_profile', newProfile);
+    triggerSync(newProfile, recipes);
   };
 
   const updateDailyConsumption = (updates: Partial<StoreContextType['dailyConsumption']>) => {
@@ -104,7 +157,7 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   };
 
   return (
-    <StoreContext.Provider value={{ recipes, addRecipe, deleteRecipe, updateRecipe, profile, updateProfile, dailyConsumption, updateDailyConsumption, folderPosts, setFolderPosts, isLoading }}>
+    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, profile, updateProfile, dailyConsumption, updateDailyConsumption, folderPosts, setFolderPosts, isLoading, loadFromCloud, syncToCloud }}>
       {children}
     </StoreContext.Provider>
   );

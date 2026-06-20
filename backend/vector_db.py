@@ -192,16 +192,18 @@ def perform_similarity_search(collection, query: str, n_results: int = 5) -> Lis
         
     return formatted_results
 
-def perform_filtered_search(collection, query: str, max_calories: float = None, min_protein: float = None, max_time: int = None, restriccion: str = None, n_results: int = 5) -> List[Dict[str, Any]]:
+def perform_filtered_search(collection, query: str, min_calories: float = None, max_calories: float = None, min_protein: float = None, max_time: int = None, n_results: int = 5) -> List[Dict[str, Any]]:
     filters = []
+    
+    if min_calories is not None:
+        filters.append({"calorias": {"$gte": min_calories}})
     if max_calories is not None:
         filters.append({"calorias": {"$lte": max_calories}})
+        
     if min_protein is not None:
         filters.append({"proteina": {"$gte": min_protein}})
     if max_time is not None:
         filters.append({"tiempo": {"$lte": max_time}})
-    if restriccion:
-        filters.append({"restricciones": {"$contains": restriccion}})
         
     where_clause = None
     if len(filters) == 1:

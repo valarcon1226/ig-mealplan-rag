@@ -75,14 +75,23 @@ export default function Planner() {
     window.print();
   };
 
-  const openRecipeDetails = (recipeId: string | number) => {
-    // Buscar la receta completa en el store
-    const fullRecipe = recipes.find(r => String(r.id) === String(recipeId));
-    if (fullRecipe) {
-      setSelectedRecipe(fullRecipe);
-    } else {
-      alert("Recipe details not found in local cookbook.");
-    }
+  const openRecipeDetails = (meal: any) => {
+    const recipeToOpen = {
+      id: meal.recipe_id,
+      title: meal.nombre,
+      thumbnail_url: meal.thumbnail_url,
+      video_url: meal.video_url,
+      ingredients: meal.ingredients || [],
+      instructions: meal.instructions || [],
+      macros: {
+        calories: meal.calorias || 0,
+        protein: meal.proteinas || 0,
+        carbs: meal.carbohidratos || 0,
+        fat: meal.grasas || 0
+      },
+      servings: 1
+    };
+    setSelectedRecipe(recipeToOpen as Recipe);
   };
 
   const eatRecipe = (recipe: Recipe) => {
@@ -219,7 +228,7 @@ export default function Planner() {
                     {currentPlan.meals.map((meal: any, i: number) => (
                       <div 
                         key={i} 
-                        onClick={() => openRecipeDetails(meal.recipe_id)}
+                        onClick={() => openRecipeDetails(meal)}
                         className="flex gap-3 text-sm p-2 rounded-lg hover:bg-neutral-800 transition-colors cursor-pointer group"
                       >
                         <div className="w-20 shrink-0 text-orange-500 font-bold uppercase text-xs mt-1">{meal.meal_type}</div>

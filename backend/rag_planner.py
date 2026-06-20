@@ -16,29 +16,53 @@ class RAGMealPlanner:
 
     def generate(self, meal_structure: List[str], target_macros: Dict[str, float], restrictions: List[str], cycle_phase: str, plan_type: str = "daily") -> Any:
         is_weekly = (plan_type == "weekly")
-        n_results = 30 if is_weekly else 15
+        n_results = 3
         
         candidates_by_meal = {}
         all_candidates_context = ""
         
+        total_target_cals = target_macros.get("calorias", 2000)
+        
+        percentages = {}
+        if len(meal_structure) == 3:
+            percentages = {m: 0.333 for m in meal_structure}
+        elif len(meal_structure) == 5:
+            # Asignaciones especificas sugeridas
+            idx = 0
+            for m in meal_structure:
+                ml = m.lower()
+                if "desayuno" in ml: percentages[m] = 0.25
+                elif "almuerzo" in ml or "comida" in ml: percentages[m] = 0.30
+                elif "cena" in ml: percentages[m] = 0.20
+                else: 
+                    # snacks
+                    if idx == 1: percentages[m] = 0.15 # Media mañana
+                    else: percentages[m] = 0.10 # Merienda
+                idx += 1
+        else:
+            percentages = {m: 1.0 / len(meal_structure) for m in meal_structure}
+
         # 1. Recuperar candidatos
         for meal_type in meal_structure:
-            # Traer más resultados iniciales para tener margen de filtrado estricto
+            meal_cals = total_target_cals * percentages.get(meal_type, 1.0 / len(meal_structure))
+            min_cals = meal_cals * 0.70
+            max_cals = meal_cals * 1.30
+            
+            # Pedimos muchos resultados filtrando por calorias
             results = perform_filtered_search(
                 self.collection,
                 query=f"recetas de {meal_type}",
+                min_calories=min_cals,
+                max_calories=max_cals,
                 n_results=100
             )
             
+            # Filtrar estrictamente por tag y restricciones en python
             valid_results = []
             for res in results:
                 tags = [t.strip().lower() for t in res.get("tags", "").split(",")]
-                
-                # Filtrar estrictamente por tipo de comida
                 if meal_type.lower() not in tags:
                     continue
-                    
-                # Filtrar estrictamente por restricciones (ej. vegetariano)
                 if restrictions:
                     fails_restriction = False
                     for rest in restrictions:
@@ -52,13 +76,36 @@ class RAGMealPlanner:
                 if len(valid_results) >= n_results:
                     break
             
-            # Si somos muy estrictos y no hay, relajamos un poco solo para no romper
+            # Si somos muy estrictos y no hay, relajamos calorias
             if not valid_results:
-                valid_results = results[:10]
+                results = perform_filtered_search(
+                    self.collection,
+                    query=f"recetas de {meal_type}",
+                    n_results=100
+                )
+                for res in results:
+                    tags = [t.strip().lower() for t in res.get("tags", "").split(",")]
+                    if meal_type.lower() not in tags:
+                        continue
+                    if restrictions:
+                        fails_restriction = False
+                        for rest in restrictions:
+                            if rest.lower() not in tags:
+                                fails_restriction = True
+                                break
+                        if fails_restriction:
+                            continue
+                    valid_results.append(res)
+                    if len(valid_results) >= n_results:
+                        break
+                
+            # Si a pesar de relajar calorias sigue sin haber por las restricciones, usamos los mas relevantes sin restriccion estricta
+            if not valid_results:
+                valid_results = results[:n_results]
                 
             candidates_by_meal[meal_type] = valid_results
             
-            all_candidates_context += f"\n--- Candidatos para {meal_type.upper()} ---\n"
+            all_candidates_context += f"\n--- Candidatos para {meal_type.upper()} (Objetivo: ~{int(meal_cals)} kcal) ---\n"
             for r in valid_results:
                 all_candidates_context += (
                     f"ID: {r.get('id', 'UNKNOWN')} | Nombre: {r['nombre']} | "
@@ -131,6 +178,8 @@ CANDIDATOS DISPONIBLES:
         response = self.llm.invoke(messages)
         text_resp = response.content
         
+        print("GEMINI RAW RESP:", text_resp)
+        
         if isinstance(text_resp, list):
             text_resp = text_resp[0].get("text", "") if isinstance(text_resp[0], dict) else str(text_resp[0])
         elif not isinstance(text_resp, str):
@@ -161,12 +210,42 @@ CANDIDATOS DISPONIBLES:
                 if not recipe:
                     continue
                     
+                ing_raw = []
+                if recipe.ingredients_raw:
+                    try:
+                        ing_raw = json.loads(recipe.ingredients_raw)
+                    except:
+                        pass
+                        
+                ing_mapped = []
+                for ing in ing_raw:
+                    if isinstance(ing, dict):
+                        name = ing.get("nombre") or ing.get("ingrediente") or ing.get("item") or "Ingrediente"
+                        cantidad = str(ing.get("cantidad", "")) if ing.get("cantidad") is not None else ""
+                        unidad = str(ing.get("unidad", "")) if ing.get("unidad") is not None else ""
+                        ing_mapped.append({"name": name, "amount": f"{cantidad} {unidad}".strip()})
+                    else:
+                        ing_mapped.append({"name": str(ing), "amount": ""})
+                        
+                instructions = []
+                if recipe.instructions:
+                    try:
+                        instructions = json.loads(recipe.instructions)
+                    except:
+                        pass
+
                 meals_result.append({
                     "meal_type": m_type,
                     "recipe_id": recipe.id,
                     "nombre": recipe.nombre,
                     "calorias": recipe.nutrition.calories if recipe.nutrition else 0,
-                    "proteinas": recipe.nutrition.proteins if recipe.nutrition else 0
+                    "proteinas": recipe.nutrition.proteins if recipe.nutrition else 0,
+                    "carbohidratos": recipe.nutrition.carbohydrates if recipe.nutrition else 0,
+                    "grasas": recipe.nutrition.fats if recipe.nutrition else 0,
+                    "thumbnail_url": recipe.thumbnail_url,
+                    "video_url": recipe.video_url,
+                    "ingredients": ing_mapped,
+                    "instructions": instructions
                 })
                 
                 if recipe.nutrition:

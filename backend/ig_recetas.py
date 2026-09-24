@@ -10,8 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict
-from instagrapi import Client
 from instagrapi.exceptions import LoginRequired, ChallengeRequired
+
+from ig_auth import get_client_for_user
+from ig_media import resolve_media, download_media, download_bytes, MediaResolutionError, MediaDownloadError
 
 # LangChain pipeline (import opcional — solo falla si no está instalado)
 try:
@@ -116,35 +118,6 @@ def extract_media(item: dict) -> dict:
     }
 
 
-def get_client_for_user(username: str = None, password: str = None) -> Client:
-    if not username:
-        username = os.environ.get("IG_USERNAME")
-    if not password:
-        password = os.environ.get("IG_PASSWORD")
-        
-    if not username:
-        raise HTTPException(status_code=400, detail="Debes definir el usuario de Instagram (vía headers X-IG-Username o variables de entorno).")
-        
-    user_cl = Client()
-    session_path = f"ig_session_{username}.json"
-    
-    if os.path.exists(session_path):
-        user_cl.load_settings(session_path)
-        return user_cl
-            
-    if not password:
-        raise HTTPException(status_code=401, detail=f"Sesión no iniciada o expirada para {username}, y no se proporcionó contraseña.")
-        
-    try:
-        user_cl.login(username, password)
-        user_cl.dump_settings(session_path)
-        return user_cl
-    except (LoginRequired, ChallengeRequired) as e:
-        raise HTTPException(status_code=401, detail=f"Autenticación de Instagram requerida para {username}: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al iniciar sesión en Instagram para {username}: {str(e)}")
-
-
 @app.on_event("startup")
 def startup():
     load_jobs()
@@ -174,7 +147,15 @@ def list_collections(
 ):
     if x_ig_username == "test":
         return {"total": 1, "collections": [{"collection_id": "test_folder", "name": "recetas saludables", "media_count": 10}]}
-    return {"total": 1, "collections": [{"collection_id": "backup_collection", "name": "Recetas Saludables (Backup)", "media_count": 1}]}
+
+    from ig_collections import list_collections_live
+    user_cl = get_client_for_user(x_ig_username, x_ig_password)
+    try:
+        collections = list_collections_live(user_cl)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo carpetas de Instagram: {str(e)}")
+
+    return {"total": len(collections), "collections": collections}
 
 
 STATE_FILE = "ig_state.json"
@@ -190,57 +171,73 @@ def save_state(state: dict):
         json.dump(state, f)
 
 
+def _get_analyzed_media_ids() -> set:
+    try:
+        from database import SessionLocal
+        from models import Recipe
+        db = SessionLocal()
+        ids = {r.media_id for r in db.query(Recipe).all()}
+        db.close()
+        return ids
+    except Exception as e:
+        print(f"Error reading SQLite: {e}")
+        return set()
+
+
 @app.get("/collection-posts")
 def get_collection_posts(
     collection_id: str,
     batch_size: int = 20,
     cursor: str = None,
     since: int = None,
+    force_sync: bool = False,
     x_ig_username: str = Header(None),
     x_ig_password: str = Header(None)
 ):
-    import json
-    with open("recetas_saludables_backup.json", "r", encoding="utf-8-sig") as f:
-        data = json.load(f)
-    all_posts = data.get("posts", [])
-    
-    try:
-        from database import SessionLocal
-        from models import Recipe
-        db = SessionLocal()
-        # IDs of recipes already in SQLite DB
-        analyzed_ids = {r.media_id for r in db.query(Recipe).all()}
-        db.close()
-    except Exception as e:
-        print(f"Error reading SQLite: {e}")
-        analyzed_ids = set()
-        
+    from ig_collections import sync_collection_posts, get_posts_for_collection
+
+    if collection_id != "test_folder":
+        user_cl = get_client_for_user(x_ig_username, x_ig_password)
+        try:
+            sync_collection_posts(collection_id, user_cl, force=force_sync)
+        except Exception as e:
+            print(f"[collection-posts] Aviso: no se pudo sincronizar con Instagram ({e}). Usando lo que haya en cache local.")
+
+    all_posts = get_posts_for_collection(collection_id)
+    analyzed_ids = _get_analyzed_media_ids()
+
     unanalyzed = [p for p in all_posts if p.get("media_id") not in analyzed_ids]
-    # Retornamos 2 para la prueba que pide el usuario
-    posts_to_return = unanalyzed[:2]
-    
+    posts_to_return = unanalyzed[:batch_size]
+
     return {
         "batch_total": len(posts_to_return),
         "workflow_a_count": len(posts_to_return),
         "workflow_b_count": 0,
         "next_cursor": None,
-        "has_more": False,
+        "has_more": len(unanalyzed) > len(posts_to_return),
         "posts": posts_to_return
     }
 
 
 @app.get("/collection-posts/all")
 def get_all_collection_posts(
-    collection_id: str, 
+    collection_id: str,
     since: int = 0,
+    force_sync: bool = False,
     x_ig_username: str = Header(None),
     x_ig_password: str = Header(None)
 ):
-    import json
-    with open("recetas_saludables_backup.json", "r", encoding="utf-8-sig") as f:
-        data = json.load(f)
-    all_posts = data.get("posts", [])
-    
+    from ig_collections import sync_collection_posts, get_posts_for_collection
+
+    if collection_id != "test_folder":
+        user_cl = get_client_for_user(x_ig_username, x_ig_password)
+        try:
+            sync_collection_posts(collection_id, user_cl, force=force_sync)
+        except Exception as e:
+            print(f"[collection-posts/all] Aviso: no se pudo sincronizar con Instagram ({e}). Usando lo que haya en cache local.")
+
+    all_posts = get_posts_for_collection(collection_id)
+
     # El usuario pidió ver TODAS y mostrar el estado "Saved" en el UI.
     return {
         "total": len(all_posts),
@@ -331,26 +328,12 @@ def analyze_media(
     obtiene la URL directamente desde Instagram (instagrapi),
     y analiza la imagen/video con Gemini.
     """
-    user_cl = get_client_for_user(x_ig_username, x_ig_password)
     try:
-        media_pk = media_id.split("_")[0] if "_" in media_id else media_id
-        try:
-            media = user_cl.media_info_v1(media_pk)
-        except Exception:
-            media = user_cl.media_info(media_pk)
-        if media.media_type == 1:
-            video_url = str(media.thumbnail_url)
-        elif media.media_type == 2:
-            video_url = str(media.video_url)
-        elif media.media_type == 8:
-            first = media.resources[0]
-            video_url = str(first.thumbnail_url) if first.media_type == 1 else str(first.video_url)
-        else:
-            video_url = str(media.thumbnail_url)
-    except Exception as e:
+        resolved = resolve_media(media_id, x_ig_username, x_ig_password, allow_cache_fallback=False)
+    except MediaResolutionError as e:
         raise HTTPException(status_code=500, detail=f"Error obteniendo media de Instagram: {str(e)}")
 
-    return _do_analyze(media_id, video_url, gemini_api_key)
+    return _do_analyze(media_id, resolved["url"], gemini_api_key)
 
 @app.post("/analyze-video")
 def analyze_video(body: AnalyzeVideoRequest):
@@ -388,7 +371,7 @@ def _do_analyze(media_id: str, video_url: str, gemini_api_key: str):
                 "\"origen_nutricional\":\"Calculado por IA\"} "
                 "Si no es receta devuelve {\"nombre\":null}."
             )
-            img_data = __import__('base64').b64encode(req_lib.get(video_url, timeout=30, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.instagram.com/"}).content).decode()
+            img_data = __import__('base64').b64encode(download_bytes(video_url)).decode()
             gen_resp = _gemini_post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
                 {"contents": [{"parts": [
@@ -403,20 +386,12 @@ def _do_analyze(media_id: str, video_url: str, gemini_api_key: str):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error analizando imagen: {str(e)}")
 
-    # 1. Descargar video temporalmente
+    # 1. Descargar video temporalmente (con reintentos + fallback a yt-dlp si la URL directa falla/expiró)
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp_path = tmp.name
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://www.instagram.com/",
-            "Accept": "*/*",
-        }
-        r = req_lib.get(video_url, timeout=120, stream=True, headers=headers)
-        r.raise_for_status()
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-            for chunk in r.iter_content(chunk_size=8192):
-                tmp.write(chunk)
-            tmp_path = tmp.name
-    except Exception as e:
+        download_media(video_url, tmp_path, media_id=media_id)
+    except MediaDownloadError as e:
         raise HTTPException(status_code=500, detail=f"Error descargando video: {str(e)}")
 
     # 2. Subir a Gemini Files API
@@ -694,19 +669,20 @@ class LangchainAnalyzeByIdRequest(BaseModel):
     target_servings: int = 0
     x_ig_username: str = None
     x_ig_password: str = None
-    target_servings: int = 0
-    x_ig_username: str = None
-    x_ig_password: str = None
 
 
 @app.post("/analyze-langchain-by-id")
 def analyze_langchain_by_id(body: LangchainAnalyzeByIdRequest):
     """
     Versión robusta de /analyze-langchain que solo necesita media_id.
-    Obtiene la URL del video/imagen directamente desde Instagram (instagrapi),
-    sin depender de que la URL venga desde la app.
+    Obtiene la URL del video/imagen directamente desde Instagram en vivo
+    (vía instagrapi, reutilizando la sesión persistente). Si Instagram no
+    está disponible (sin sesión, rate limit, etc.) cae al backup local
+    como último recurso — nunca a un post equivocado.
 
-    Útil cuando post.url viene vacío desde /collection-posts.
+    Útil cuando post.url viene vacío desde /collection-posts, o cuando la
+    URL que tenía el frontend ya expiró (las URLs de IG son firmadas y de
+    corta duración).
 
     Body:
         media_id (str): ID único del post de Instagram
@@ -718,26 +694,15 @@ def analyze_langchain_by_id(body: LangchainAnalyzeByIdRequest):
     if not LANGCHAIN_AVAILABLE:
         raise HTTPException(status_code=503, detail="LangChain no está instalado.")
 
-    # Resolver URL desde el backup (MOCK)
     try:
-        import json
-        with open("recetas_saludables_backup.json", "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-        posts = data.get("posts", [])
-        
-        # Buscar el post por media_id
-        mock_post = next((p for p in posts if p.get("media_id") == body.media_id), posts[0] if posts else None)
-        
-        if mock_post and "url" in mock_post:
-            video_url = mock_post["url"]
-            caption = mock_post.get("caption", mock_post.get("caption_text", ""))
-        else:
-            raise HTTPException(status_code=404, detail=f"No se pudo obtener URL válida para media_id {body.media_id}")
+        resolved = resolve_media(body.media_id, body.x_ig_username, body.x_ig_password)
+    except MediaResolutionError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error obteniendo URL del backup: {str(e)}")
+    video_url = resolved["url"]
+    caption = resolved.get("caption", "")
+    if not video_url:
+        raise HTTPException(status_code=404, detail=f"No se pudo obtener una URL válida para media_id {body.media_id}")
 
     # Correr el pipeline con la URL resuelta
     try:
@@ -750,7 +715,7 @@ def analyze_langchain_by_id(body: LangchainAnalyzeByIdRequest):
             save_to_db=True,
             caption=caption,
         )
-        return {"status": "success", "video_url_used": video_url, "recipe": result}
+        return {"status": "success", "video_url_used": video_url, "url_source": resolved["source"], "recipe": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en pipeline LangChain: {str(e)}")
 
@@ -961,7 +926,9 @@ def generate_mealplan(request: MealPlanRequest):
         "calorias": request.dailyGoals.get("calories", 2000),
         "proteinas": request.dailyGoals.get("protein", 150),
         "carbohidratos": request.dailyGoals.get("carbs", 200),
-        "grasas": request.dailyGoals.get("fat", 60)
+        "grasas": request.dailyGoals.get("fat", 60),
+        "azucares": request.dailyGoals.get("sugar"),
+        "fibra": request.dailyGoals.get("fiber"),
     }
     
     structure = [m.lower() for m in request.meals]
@@ -980,3 +947,252 @@ def generate_mealplan(request: MealPlanRequest):
         
     db.close()
     return result
+
+
+# --- PANTRY & GROCERY LIST ENDPOINTS ---
+
+class PantryItemCreate(BaseModel):
+    name: str
+    amount: str = None
+
+@app.get("/api/pantry")
+def get_pantry():
+    from database import SessionLocal
+    from models import PantryItem
+    db = SessionLocal()
+    items = db.query(PantryItem).all()
+    result = [{"id": i.id, "name": i.name, "amount": i.amount} for i in items]
+    db.close()
+    return result
+
+@app.post("/api/pantry")
+def add_pantry_item(item: PantryItemCreate):
+    """
+    Si ya existe un item con el mismo nombre (ej. al tildar un item de la
+    grocery list dos semanas seguidas), suma la cantidad en vez de crear una
+    fila duplicada - pero solo cuando ambas cantidades tienen la misma
+    unidad; si no, no adivinamos la suma y se guarda como fila aparte.
+    """
+    from database import SessionLocal
+    from models import PantryItem
+    from ingredient_normalizer import parse_amount_str
+
+    db = SessionLocal()
+    try:
+        name_clean = item.name.strip()
+        existing = db.query(PantryItem).filter(PantryItem.name.ilike(name_clean)).first()
+
+        if existing:
+            new_qty, new_unit = parse_amount_str(str(item.amount or ""))
+            old_qty, old_unit = parse_amount_str(str(existing.amount or ""))
+            if new_qty and old_qty and new_unit.strip().lower() == old_unit.strip().lower():
+                total = old_qty + new_qty
+                existing.amount = f"{total:g} {new_unit}".strip()
+                db.commit()
+                db.refresh(existing)
+                return {"id": existing.id, "name": existing.name, "amount": existing.amount}
+
+        new_item = PantryItem(name=name_clean, amount=item.amount)
+        db.add(new_item)
+        db.commit()
+        db.refresh(new_item)
+        return {"id": new_item.id, "name": new_item.name, "amount": new_item.amount}
+    finally:
+        db.close()
+
+@app.delete("/api/pantry/{item_id}")
+def delete_pantry_item(item_id: int):
+    from database import SessionLocal
+    from models import PantryItem
+    db = SessionLocal()
+    item = db.query(PantryItem).filter(PantryItem.id == item_id).first()
+    if item:
+        db.delete(item)
+        db.commit()
+    db.close()
+    return {"status": "ok"}
+
+class GroceryPlanRequest(BaseModel):
+    meals: List[Dict]
+
+@app.post("/api/grocery/generate")
+def generate_grocery_list(req: GroceryPlanRequest):
+    """
+    Genera la lista de compras de forma determinística (sin LLM):
+    1. Suma los ingredientes de TODAS las recetas del plan (día o semana).
+    2. Resta lo que ya hay en el Pantry.
+    3. Devuelve solo lo que falta, con la cantidad faltante exacta.
+    """
+    from database import SessionLocal
+    from models import PantryItem
+    from shopping_list import generate_shopping_list
+
+    db = SessionLocal()
+    try:
+        pantry_items = db.query(PantryItem).all()
+        grocery_list = generate_shopping_list(req.meals, pantry_items)
+        return {"grocery_list": grocery_list}
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROCESAMIENTO AUTOMÁTICO EN LOTE DE UNA CARPETA (flujo: conectar → carpeta →
+# video por video → download_media → JSON → LLM completa nutrición → Cookbook)
+# ─────────────────────────────────────────────────────────────────────────────
+
+BATCH_JOBS: Dict[str, Dict] = {}
+
+
+def run_collection_batch(batch_id: str, posts: list, gemini_api_key: str):
+    from langchain_pipeline import run_recipe_pipeline
+
+    job = BATCH_JOBS[batch_id]
+    job["status"] = "processing"
+
+    for post in posts:
+        media_id = post["media_id"]
+        entry = {"media_id": media_id, "nombre": None, "status": "processing", "error": None}
+        job["items"][media_id] = entry
+        try:
+            final_recipe = run_recipe_pipeline(
+                media_id=media_id,
+                video_url=post.get("video_url") or post.get("url"),
+                gemini_api_key=gemini_api_key,
+                target_servings=0,
+                save_to_db=True,  # guarda en recetas_db.json Y en SQLite (Cookbook)
+                caption=post.get("caption", ""),
+            )
+            if final_recipe.get("is_recipe"):
+                entry["status"] = "done"
+                entry["nombre"] = final_recipe.get("nombre")
+                job["completed"] += 1
+            else:
+                entry["status"] = "skipped"
+                entry["error"] = "El contenido no parece ser una receta."
+                job["skipped"] += 1
+        except Exception as e:
+            entry["status"] = "failed"
+            entry["error"] = str(e)
+            job["failed"] += 1
+
+        job["processed"] += 1
+
+    job["status"] = "completed"
+
+
+@app.post("/api/collections/{collection_id}/process")
+def process_collection(
+    collection_id: str,
+    gemini_api_key: str,
+    background_tasks: BackgroundTasks,
+    force_sync: bool = False,
+    sync_amount: int = 50,
+    x_ig_username: str = Header(None),
+    x_ig_password: str = Header(None),
+):
+    """
+    Sincroniza la carpeta (respetando el TTL, salvo force_sync=true) y arranca
+    a procesar en segundo plano, video por video, todos los posts que todavía
+    no estén en el Cookbook. Devuelve un batch_id para consultar el progreso
+    en GET /api/collections/batch-status/{batch_id}.
+
+    sync_amount: cuántos posts pedirle a Instagram en esta sincronización
+    (default 50). Subilo si la carpeta tiene más posts nuevos que eso.
+    """
+    if not LANGCHAIN_AVAILABLE:
+        raise HTTPException(status_code=503, detail="LangChain no está instalado.")
+
+    import uuid
+    from ig_collections import sync_collection_posts, get_posts_for_collection
+
+    user_cl = get_client_for_user(x_ig_username, x_ig_password)
+    try:
+        sync_collection_posts(collection_id, user_cl, force=force_sync, amount=sync_amount)
+    except Exception as e:
+        print(f"[process_collection] Aviso: sync con Instagram falló ({e}). Se sigue con lo que haya en cache.")
+
+    posts = get_posts_for_collection(collection_id)
+    analyzed_ids = _get_analyzed_media_ids()
+    pending = [p for p in posts if p["media_id"] not in analyzed_ids]
+
+    batch_id = str(uuid.uuid4())
+    BATCH_JOBS[batch_id] = {
+        "collection_id": collection_id,
+        "status": "pending",
+        "total": len(pending),
+        "processed": 0,
+        "completed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "items": {},
+    }
+
+    if pending:
+        background_tasks.add_task(run_collection_batch, batch_id, pending, gemini_api_key)
+    else:
+        BATCH_JOBS[batch_id]["status"] = "completed"
+
+    return {"batch_id": batch_id, "total": len(pending)}
+
+
+@app.get("/api/collections/batch-status/{batch_id}")
+def get_batch_status(batch_id: str):
+    job = BATCH_JOBS.get(batch_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Batch no encontrado")
+    return job
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPORTAR RECETAS DE TIKTOK
+# TikTok no tiene (a diferencia de Instagram) una forma viable de sincronizar
+# una carpeta/colección privada en vivo - ver discusión con el usuario. La vía
+# práctica: el usuario pega la URL de un video puntual y se reusa el mismo
+# pipeline de LangChain que ya procesa recetas de Instagram.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TikTokImportRequest(BaseModel):
+    url: str
+    gemini_api_key: str = None
+    target_servings: int = 0
+
+
+@app.post("/api/tiktok/import")
+def import_tiktok_recipe(body: TikTokImportRequest):
+    """
+    Descarga un video de TikTok a partir de su URL y lo procesa con el mismo
+    pipeline de LangChain que usa Instagram (extraer -> estructurar -> nutrición).
+    Termina en el mismo Cookbook (SQLite + Chroma), sin distinción de origen.
+    """
+    if not LANGCHAIN_AVAILABLE:
+        raise HTTPException(status_code=503, detail="LangChain no está instalado.")
+
+    import yt_dlp
+
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            info = ydl.extract_info(body.url, download=False)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"No se pudo leer el video de TikTok: {str(e)}")
+
+    video_id = info.get("id") if info else None
+    if not video_id:
+        raise HTTPException(status_code=400, detail="No se pudo identificar el video de TikTok (¿la URL es correcta?).")
+
+    media_id = f"tiktok_{video_id}"
+    caption = (info.get("description") or info.get("title") or "").strip()
+
+    try:
+        from langchain_pipeline import run_recipe_pipeline
+        result = run_recipe_pipeline(
+            media_id=media_id,
+            video_url=body.url,
+            gemini_api_key=body.gemini_api_key,
+            target_servings=body.target_servings,
+            save_to_db=True,
+            caption=caption,
+        )
+        return {"status": "success", "media_id": media_id, "recipe": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en pipeline: {str(e)}")

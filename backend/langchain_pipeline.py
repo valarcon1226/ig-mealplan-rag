@@ -167,35 +167,13 @@ def extract_text_from_media(inputs: dict) -> dict:
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
                 tmp_path = tmp.name
                 
-            downloaded = False
-            if video_url:
-                try:
-                    # Download directly from URL
-                    resp = req_lib.get(video_url, timeout=30, stream=True)
-                    if resp.status_code == 200:
-                        with open(tmp_path, 'wb') as f:
-                            for chunk in resp.iter_content(chunk_size=8192):
-                                f.write(chunk)
-                        downloaded = True
-                        print("Downloaded video directly from URL!")
-                    else:
-                        print(f"Failed to download from URL, status code: {resp.status_code}")
-                except Exception as e:
-                    print(f"Error downloading from URL: {e}")
-            
-            if not downloaded:
-                print("Falling back to yt-dlp...")
-                # Descargar video usando ig_downloader
-                from ig_downloader import download_ig_video
-                for attempt in range(3):
-                    try:
-                        download_ig_video(media_id, tmp_path)
-                        downloaded = True
-                        break  # Éxito, salir del loop
-                    except Exception as e:
-                        if attempt == 2:
-                            raise RuntimeError(f"Fallo al descargar video tras 3 intentos: {str(e)}")
-                        time.sleep(2)
+            # Descarga con reintentos + backoff; si la URL directa falló del
+            # todo (ej. venció), cae internamente a yt-dlp con el media_id.
+            from ig_media import download_media, MediaDownloadError
+            try:
+                download_media(video_url, tmp_path, media_id=media_id)
+            except MediaDownloadError as e:
+                raise RuntimeError(f"Fallo al descargar video: {str(e)}")
 
             # Subir a Gemini Files API
             print("Uploading to Gemini Files API...")
@@ -314,6 +292,8 @@ REGLAS ESTRICTAS:
 4. Normaliza las cantidades: convierte tazas, cucharadas, etc. a gramos/ml cuando sea posible.
 5. Separa cada paso de las instrucciones como un elemento independiente de la lista.
 6. Genera una lista de 'tags' indicando el tipo de comida (ej: desayuno, almuerzo, cena, postre, snack) según los ingredientes y el estilo.
+7. Identifica el 'tipo_cocina' (ej: italiana, mexicana, asiática, mediterránea, americana, latina, fusión, etc.) según los ingredientes y técnicas usadas. Si no es claramente de ninguna tradición específica, usa "internacional".
+8. Clasifica 'dificultad' como "facil", "media" o "dificil", según la cantidad de pasos, técnicas involucradas y tiempo de preparación.
 
 Estructura JSON requerida:
 {{
@@ -321,6 +301,8 @@ Estructura JSON requerida:
   "tiempo_preparacion_min": 30,
   "porciones": 4,
   "tags": ["almuerzo", "cena"],
+  "tipo_cocina": "italiana",
+  "dificultad": "facil",
   "ingredientes": [
     {{"nombre": "nombre del ingrediente", "cantidad": 200, "unidad": "g"}}
   ],
@@ -361,6 +343,9 @@ def structure_recipe(inputs: dict) -> dict:
         try:
             response = (STRUCTURE_PROMPT | llm).invoke({"raw_text": raw_text})
             text = response.content if hasattr(response, "content") else str(response)
+            if isinstance(text, list):
+                # Gemini a veces devuelve el contenido como lista de partes en vez de string plano
+                text = " ".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in text)
             match = re.search(r'\{[\s\S]*\}', text)
             structured = json.loads(match.group(0)) if match else {"nombre": None}
         except Exception as e:
@@ -485,6 +470,8 @@ def calculate_nutrition(inputs: dict) -> dict:
         "porciones_originales": nutrition_data.get("porciones_originales", porciones_originales),
         "porciones_ajustadas": nutrition_data.get("porciones_ajustadas", target_servings),
         "tags": structured_recipe.get("tags", []),
+        "tipo_cocina": structured_recipe.get("tipo_cocina"),
+        "dificultad": structured_recipe.get("dificultad"),
         "ingredientes": structured_recipe.get("ingredientes", []),
         "ingredientes_ajustados": nutrition_data.get("ingredientes_ajustados", []),
         "instrucciones": structured_recipe.get("instrucciones", []),
@@ -559,5 +546,12 @@ def run_recipe_pipeline(
 
     if save_to_db and final_recipe.get("is_recipe"):
         save_recipe(media_id, final_recipe)
+        # Persistir también en SQLite: es lo que /api/recipes y el Cookbook
+        # realmente leen. Antes esto requería correr un script aparte a mano.
+        try:
+            from recipe_store import persist_recipe_to_sqlite
+            persist_recipe_to_sqlite(media_id, final_recipe)
+        except Exception as e:
+            print(f"[langchain_pipeline] Aviso: no se pudo persistir '{media_id}' en SQLite: {e}")
 
     return final_recipe

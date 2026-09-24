@@ -10,7 +10,7 @@ export default function Planner() {
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
   
-  const [planType, setPlanType] = useState<'daily' | 'weekly'>('daily');
+  const [numDays, setNumDays] = useState(1);
   const [currentDayIndex, setCurrentDayIndex] = useState(0);
 
   // Selecciones disponibles (con soporte para múltiples snacks)
@@ -52,7 +52,7 @@ export default function Planner() {
         body: JSON.stringify({
           dailyGoals: profile.dailyGoals,
           meals: mealsToSend,
-          plan_type: planType
+          num_days: numDays
         })
       });
       const data = await res.json();
@@ -126,19 +126,19 @@ export default function Planner() {
           <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-2xl w-full max-w-sm space-y-6">
             <h2 className="text-xl font-bold">Generate Plan</h2>
             
-            <div className="flex bg-black rounded-lg p-1 border border-neutral-800">
-              <button 
-                onClick={() => setPlanType('daily')}
-                className={`flex-1 py-2 rounded-md text-sm font-bold transition-colors ${planType === 'daily' ? 'bg-orange-500 text-black' : 'text-neutral-400 hover:text-white'}`}
-              >
-                Daily
-              </button>
-              <button 
-                onClick={() => setPlanType('weekly')}
-                className={`flex-1 py-2 rounded-md text-sm font-bold transition-colors ${planType === 'weekly' ? 'bg-orange-500 text-black' : 'text-neutral-400 hover:text-white'}`}
-              >
-                Weekly (7 Days)
-              </button>
+            <div>
+              <label className="text-xs font-bold text-neutral-400 block mb-2">¿Cuántos días quieres planear?</label>
+              <input
+                type="number"
+                min={1}
+                max={14}
+                value={numDays}
+                onChange={e => {
+                  const v = parseInt(e.target.value, 10);
+                  setNumDays(Number.isNaN(v) ? 1 : Math.max(1, Math.min(14, v)));
+                }}
+                className="w-full bg-black border border-neutral-800 rounded-lg px-3 py-3 text-sm text-white focus:border-orange-500 outline-none"
+              />
             </div>
 
             <p className="text-sm text-neutral-400">Which meals do you want to include each day?</p>
@@ -181,7 +181,7 @@ export default function Planner() {
         <div className="space-y-6">
           <div className="flex justify-between items-center print:hidden">
             <h2 className="font-bold text-xl">
-              {isWeekly ? `Weekly Plan` : `Today's Plan`}
+              {isWeekly ? `Plan (${plan.length} días)` : `Today's Plan`}
             </h2>
             <div className="flex gap-2">
               <button onClick={printPdf} className="p-2 border border-neutral-800 rounded-lg hover:bg-neutral-900 text-neutral-400 hover:text-white"><FileDown className="w-4 h-4" /></button>

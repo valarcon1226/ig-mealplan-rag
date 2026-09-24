@@ -14,8 +14,8 @@ class RAGMealPlanner:
         self.collection = get_or_create_collection(self.chroma_client)
         self.llm = get_llm()
 
-    def generate(self, meal_structure: List[str], target_macros: Dict[str, float], restrictions: List[str], cycle_phase: str, plan_type: str = "daily") -> Any:
-        is_weekly = (plan_type == "weekly")
+    def generate(self, meal_structure: List[str], target_macros: Dict[str, float], restrictions: List[str], cycle_phase: str, num_days: int = 1) -> Any:
+        is_multi_day = num_days > 1
         n_results = 3
         
         all_candidates_context = ""
@@ -122,18 +122,19 @@ class RAGMealPlanner:
         slot_keys = [slot_key for slot_key, _ in slots]
         keys_example = ",\n        ".join([f'"{k}": "ID_DEL_CANDIDATO"' for k in slot_keys])
         
-        if is_weekly:
-            goal_text = f"Armar un plan SEMANAL (7 días) que incluya exactamente estas comidas CADA DÍA: {', '.join(meal_structure)}."
+        if is_multi_day:
+            remaining_days = ", ".join(str(d) for d in range(2, num_days + 1))
+            goal_text = f"Armar un plan de {num_days} DÍAS que incluya exactamente estas comidas CADA DÍA: {', '.join(meal_structure)}."
             json_format = f"""{{
   "days": [
     {{
       "day": 1,
       {keys_example}
     }}
-    // ... repite la estructura para el day 2, 3, 4, 5, 6 y 7
+    // ... repite la estructura para el day {remaining_days}
   ]
 }}"""
-            instructions_text = f"DEBES generar exactamente 7 días. Para CADA DÍA, DEBES rellenar TODAS las llaves obligatorias ({', '.join(slot_keys)}). Cada llave es una comida distinta aunque el nombre se repita (ej. hay dos snacks). Intenta no repetir recetas seguidas."
+            instructions_text = f"DEBES generar exactamente {num_days} días. Para CADA DÍA, DEBES rellenar TODAS las llaves obligatorias ({', '.join(slot_keys)}). Cada llave es una comida distinta aunque el nombre se repita (ej. hay dos snacks). Intenta no repetir recetas seguidas."
         else:
             goal_text = f"Armar un plan de UN DÍA que incluya exactamente estas comidas: {', '.join(meal_structure)}."
             json_format = f"""{{
@@ -168,7 +169,7 @@ Reglas Estrictas de Selección:
 - REGLA ABSOLUTA: Tienes que devolver EXACTAMENTE 1 receta para CADA UNO de los tipos de comida solicitados. Es PREFERIBLE pasarse o quedarse corto en los macros antes que omitir una comida. NO omitas ninguna comida bajo ninguna circunstancia.
 - Prohibido seleccionar recetas que sean claramente dips, quesos, aderezos, condimentos, POLVOS o SUPLEMENTOS (como "magnesio en polvo") para snacks o comidas principales. Los snacks deben ser comidas o alimentos reales (ej. galletas, fruta, yogur, etc.).
 - Cada comida debe ser lógica y apropiada para su horario.
-- DIVERSIDAD DE DÍAS: Si estás generando múltiples días, asegúrate de crear al menos 4 o 5 días COMPLETAMENTE DIFERENTES. Puedes repetir las comidas de 1 o 2 días, pero la mayoría de la semana debe tener variedad. No repitas la misma estructura los 7 días.
+- DIVERSIDAD DE DÍAS: Si estás generando múltiples días, asegúrate de crear la mayoría de los días COMPLETAMENTE DIFERENTES entre sí. Puedes repetir las comidas de 1 o 2 días, pero no repitas la misma estructura todos los días.
 
 Devuelve tu selección como un objeto JSON estricto con este formato:
 {json_format}
@@ -278,7 +279,7 @@ CANDIDATOS DISPONIBLES:
                 "meals": meals_result
             })
             
-        if is_weekly:
+        if is_multi_day:
             return result_days
         else:
             return result_days[0] if len(result_days) > 0 else {}

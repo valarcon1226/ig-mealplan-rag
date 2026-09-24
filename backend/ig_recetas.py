@@ -862,7 +862,7 @@ class MealPlanRequest(BaseModel):
     meals: list
     restrictions: list = []
     cycle_phase: str = ""
-    plan_type: str = "daily"
+    num_days: int = 1
 
 @app.get("/api/recipes")
 def get_all_recipes():
@@ -932,14 +932,15 @@ def generate_mealplan(request: MealPlanRequest):
     }
     
     structure = [m.lower() for m in request.meals]
-    
+    num_days = max(1, min(14, request.num_days))
+
     try:
         result = planner.generate(
-            meal_structure=structure, 
+            meal_structure=structure,
             target_macros=targets,
             restrictions=request.restrictions,
             cycle_phase=request.cycle_phase,
-            plan_type=request.plan_type
+            num_days=num_days
         )
     except Exception as e:
         db.close()

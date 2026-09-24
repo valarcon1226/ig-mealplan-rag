@@ -217,6 +217,25 @@ async function startServer() {
     }
   });
 
+  app.post("/api/mealprep/generate", async (req, res) => {
+    try {
+      const vpsUrl = "http://127.0.0.1:8001";
+      const response = await fetch(`${vpsUrl}/api/mealprep/generate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "ngrok-skip-browser-warning": "true"
+        },
+        body: JSON.stringify(req.body)
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      console.error("Mealprep Error:", error);
+      res.status(500).json({ error: "Failed to generate mealprep: " + error.message });
+    }
+  });
+
   app.post("/api/analyze-langchain-by-id", async (req, res) => {
     try {
       const vpsUrl = "http://127.0.0.1:8001";

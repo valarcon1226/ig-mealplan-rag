@@ -527,6 +527,8 @@ export default function Profile() {
                          className="w-full bg-neutral-950 border border-neutral-800 rounded-lg pl-10 pr-3 py-3 text-sm outline-none text-white focus:border-orange-500 cursor-pointer"
                          placeholderText="Due Date"
                          minDate={new Date()}
+                         popperPlacement="bottom-start"
+                         popperModifiers={[{ name: "flip", options: { fallbackPlacements: [] } } as any]}
                        />
                      </div>
                    </div>
@@ -573,6 +575,8 @@ export default function Profile() {
                         className="w-full bg-neutral-950 border border-neutral-800 rounded-lg pl-10 pr-3 py-3 text-sm outline-none text-white focus:border-orange-500 cursor-pointer"
                         placeholderText="Select a date"
                         maxDate={new Date()}
+                        popperPlacement="bottom-start"
+                        popperModifiers={[{ name: "flip", options: { fallbackPlacements: [] } } as any]}
                       />
                     </div>
                   </div>

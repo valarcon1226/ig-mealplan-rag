@@ -949,6 +949,22 @@ def generate_mealplan(request: MealPlanRequest):
     return result
 
 
+class MealPrepRequest(BaseModel):
+    sessions: list
+
+@app.post("/api/mealprep/generate")
+def generate_mealprep(request: MealPrepRequest):
+    from mealprep_planner import MealPrepPlanner
+    planner = MealPrepPlanner()
+
+    try:
+        result = planner.generate(request.sessions)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return result
+
+
 # --- PANTRY & GROCERY LIST ENDPOINTS ---
 
 class PantryItemCreate(BaseModel):

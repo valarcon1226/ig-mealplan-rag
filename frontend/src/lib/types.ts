@@ -50,3 +50,32 @@ export type UserProfile = {
   pregnancyDueDate?: string;
   igUsername?: string;
 };
+
+export type MealprepTaskResult = {
+  id: string;
+  text: string;
+  estimated_minutes: number;
+  recipe_ids: number[];
+};
+
+export type MealprepPhaseResult = {
+  phase_name: string;
+  tasks: MealprepTaskResult[];
+};
+
+export type MealprepSessionResult = {
+  session_id: number;
+  estimated_total_minutes: number;
+  warning: string | null;
+  phases: MealprepPhaseResult[];
+};
+
+export type MealprepGenerateResponse = {
+  sessions: MealprepSessionResult[];
+};
+
+export type MealprepCache = {
+  planFingerprint: string;
+  sessions: MealprepSessionResult[];
+  completedTaskIds: string[];
+};

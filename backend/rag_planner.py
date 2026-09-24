@@ -18,33 +18,40 @@ class RAGMealPlanner:
         is_weekly = (plan_type == "weekly")
         n_results = 3
         
-        candidates_by_meal = {}
         all_candidates_context = ""
 
         total_target_cals = target_macros.get("calorias", 2000)
 
-        percentages = {}
-        if len(meal_structure) == 3:
-            percentages = {m: 0.333 for m in meal_structure}
-        elif len(meal_structure) == 5:
-            # Asignaciones especificas sugeridas
-            idx = 0
-            for m in meal_structure:
-                ml = m.lower()
-                if "desayuno" in ml: percentages[m] = 0.25
-                elif "almuerzo" in ml or "comida" in ml: percentages[m] = 0.30
-                elif "cena" in ml: percentages[m] = 0.20
-                else:
-                    # snacks
-                    if idx == 1: percentages[m] = 0.15 # Media mañana
-                    else: percentages[m] = 0.10 # Merienda
-                idx += 1
-        else:
-            percentages = {m: 1.0 / len(meal_structure) for m in meal_structure}
+        # meal_structure puede traer el mismo tipo repetido (ej. dos snacks),
+        # y el string del tipo ("snack") no alcanza como llave unica para el
+        # dict de porcentajes ni para las llaves del JSON que arma el LLM --
+        # sin esto, la segunda ocurrencia pisaba a la primera y se perdia una
+        # de las dos comidas. Se genera una llave unica por slot.
+        MEAL_TYPE_WEIGHTS = {
+            "desayuno": 25,
+            "almuerzo": 30,
+            "comida": 30,
+            "cena": 25,
+            "snack": 10,
+            "postre": 10,
+        }
+        DEFAULT_WEIGHT = 10
+
+        slots = []  # [(slot_key, meal_type), ...]
+        occurrences: Dict[str, int] = {}
+        for m in meal_structure:
+            occurrences[m] = occurrences.get(m, 0) + 1
+            n = occurrences[m]
+            slot_key = m if n == 1 else f"{m}_{n}"
+            slots.append((slot_key, m))
+
+        weights = {slot_key: MEAL_TYPE_WEIGHTS.get(m.lower(), DEFAULT_WEIGHT) for slot_key, m in slots}
+        total_weight = sum(weights.values()) or 1
+        percentages = {slot_key: w / total_weight for slot_key, w in weights.items()}
 
         # 1. Recuperar candidatos
-        for meal_type in meal_structure:
-            meal_cals = total_target_cals * percentages.get(meal_type, 1.0 / len(meal_structure))
+        for slot_key, meal_type in slots:
+            meal_cals = total_target_cals * percentages[slot_key]
             min_cals = meal_cals * 0.70
             max_cals = meal_cals * 1.30
             
@@ -103,9 +110,7 @@ class RAGMealPlanner:
             if not valid_results:
                 valid_results = results[:n_results]
                 
-            candidates_by_meal[meal_type] = valid_results
-
-            all_candidates_context += f"\n--- Candidatos para {meal_type.upper()} (Objetivo: ~{int(meal_cals)} kcal) ---\n"
+            all_candidates_context += f"\n--- Candidatos para {slot_key.upper()} (tipo: {meal_type}, Objetivo: ~{int(meal_cals)} kcal) ---\n"
             for r in valid_results:
                 all_candidates_context += (
                     f"ID: {r.get('id', 'UNKNOWN')} | Nombre: {r['nombre']} | "
@@ -114,7 +119,8 @@ class RAGMealPlanner:
                 )
 
         # 2. Prompt Dinámico
-        keys_example = ",\n        ".join([f'"{m}": "ID_DEL_CANDIDATO"' for m in meal_structure])
+        slot_keys = [slot_key for slot_key, _ in slots]
+        keys_example = ",\n        ".join([f'"{k}": "ID_DEL_CANDIDATO"' for k in slot_keys])
         
         if is_weekly:
             goal_text = f"Armar un plan SEMANAL (7 días) que incluya exactamente estas comidas CADA DÍA: {', '.join(meal_structure)}."
@@ -127,7 +133,7 @@ class RAGMealPlanner:
     // ... repite la estructura para el day 2, 3, 4, 5, 6 y 7
   ]
 }}"""
-            instructions_text = f"DEBES generar exactamente 7 días. Para CADA DÍA, DEBES rellenar TODAS las llaves obligatorias ({', '.join(meal_structure)}). Intenta no repetir recetas seguidas."
+            instructions_text = f"DEBES generar exactamente 7 días. Para CADA DÍA, DEBES rellenar TODAS las llaves obligatorias ({', '.join(slot_keys)}). Cada llave es una comida distinta aunque el nombre se repita (ej. hay dos snacks). Intenta no repetir recetas seguidas."
         else:
             goal_text = f"Armar un plan de UN DÍA que incluya exactamente estas comidas: {', '.join(meal_structure)}."
             json_format = f"""{{
@@ -138,7 +144,7 @@ class RAGMealPlanner:
     }}
   ]
 }}"""
-            instructions_text = f"DEBES rellenar TODAS las llaves obligatorias ({', '.join(meal_structure)}). No dejes ninguna vacía."
+            instructions_text = f"DEBES rellenar TODAS las llaves obligatorias ({', '.join(slot_keys)}). Cada llave es una comida distinta aunque el nombre se repita (ej. hay dos snacks). No dejes ninguna vacía."
 
         prompt = f"""Eres un Nutricionista y Planeador de Dietas experto.
 Objetivo: {goal_text}
@@ -202,8 +208,8 @@ CANDIDATOS DISPONIBLES:
             total_carbs = 0
             total_fats = 0
             
-            for m_type in meal_structure:
-                media_id = day_obj.get(m_type)
+            for slot_key, m_type in slots:
+                media_id = day_obj.get(slot_key)
                 if not media_id:
                     continue
                 

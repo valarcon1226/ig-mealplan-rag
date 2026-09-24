@@ -5,6 +5,7 @@ import Dashboard from './pages/Dashboard';
 import Cookbook from './pages/Cookbook';
 import Planner from './pages/Planner';
 import Pantry from './pages/Pantry';
+import Mealprep from './pages/Mealprep';
 import Profile from './pages/Profile';
 import RecipeImport from './pages/RecipeImport';
 import { Home, Book, Calendar, User, ShoppingBag } from 'lucide-react';
@@ -75,6 +76,7 @@ export default function App() {
             <Route path="/cookbook" element={<Cookbook />} />
             <Route path="/planner" element={<Planner />} />
             <Route path="/pantry" element={<Pantry />} />
+            <Route path="/mealprep" element={<Mealprep />} />
             <Route path="/profile" element={<Profile />} />
           </Routes>
         </PwaLayout>

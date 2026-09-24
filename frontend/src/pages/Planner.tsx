@@ -5,8 +5,8 @@ import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, Chevro
 import { Recipe } from '../lib/types';
 
 export default function Planner() {
-  const { profile, recipes, updateDailyConsumption, dailyConsumption, setCurrentMealPlan } = useStore();
-  const [plan, setPlan] = useState<any>(null); // puede ser array o objeto
+  const { profile, recipes, updateDailyConsumption, dailyConsumption, setCurrentMealPlan, currentMealPlan } = useStore();
+  const [plan, setPlan] = useState<any>(currentMealPlan); // puede ser array o objeto
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
   

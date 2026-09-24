@@ -1,6 +1,7 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useStore } from '../lib/store';
-import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, ChevronLeft, ChevronRight, ChefHat } from 'lucide-react';
 import { Recipe } from '../lib/types';
 
 export default function Planner() {
@@ -245,6 +246,14 @@ export default function Planner() {
               </div>
             </>
           )}
+
+          <Link
+            to="/mealprep"
+            className="w-full bg-neutral-900 border border-orange-500/40 py-3 rounded-xl flex items-center justify-center gap-2 mt-4 text-xs font-bold text-orange-400 uppercase tracking-widest"
+          >
+            <ChefHat className="w-4 h-4" /> Mealprep
+          </Link>
+
           <button
             onClick={() => setShowModal(true)}
             disabled={loading}

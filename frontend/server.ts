@@ -347,6 +347,66 @@ async function startServer() {
     }
   });
 
+  // --- Pantry & Grocery List (backend routes keep the /api prefix, so they
+  // need an explicit passthrough here too - the generic proxy below strips it) ---
+
+  app.get("/api/pantry", async (req, res) => {
+    try {
+      const vpsUrl = "http://127.0.0.1:8001";
+      const response = await fetch(`${vpsUrl}/api/pantry`, {
+        headers: { "ngrok-skip-browser-warning": "true" }
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to fetch pantry: " + error.message });
+    }
+  });
+
+  app.post("/api/pantry", async (req, res) => {
+    try {
+      const vpsUrl = "http://127.0.0.1:8001";
+      const response = await fetch(`${vpsUrl}/api/pantry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        body: JSON.stringify(req.body)
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to add pantry item: " + error.message });
+    }
+  });
+
+  app.delete("/api/pantry/:id", async (req, res) => {
+    try {
+      const vpsUrl = "http://127.0.0.1:8001";
+      const response = await fetch(`${vpsUrl}/api/pantry/${req.params.id}`, {
+        method: "DELETE",
+        headers: { "ngrok-skip-browser-warning": "true" }
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to delete pantry item: " + error.message });
+    }
+  });
+
+  app.post("/api/grocery/generate", async (req, res) => {
+    try {
+      const vpsUrl = "http://127.0.0.1:8001";
+      const response = await fetch(`${vpsUrl}/api/grocery/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        body: JSON.stringify(req.body)
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to generate grocery list: " + error.message });
+    }
+  });
+
   app.post("/api/send-webhook", async (req, res) => {
     try {
       const { webhookUrl, data } = req.body;

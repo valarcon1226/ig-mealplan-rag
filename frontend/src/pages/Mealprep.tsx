@@ -369,7 +369,7 @@ export default function Mealprep() {
                         type="checkbox"
                         checked={completed}
                         onChange={() => toggleTask(task.id)}
-                        className="w-5 h-5 mt-0.5 accent-orange-500"
+                        className="w-5 h-5 mt-0.5 shrink-0 accent-orange-500"
                       />
                       <span className={`text-sm ${completed ? 'line-through text-neutral-600' : 'text-white'}`}>
                         {task.text} <span className="text-neutral-500">({task.estimated_minutes} min)</span>

@@ -1,4 +1,4 @@
-# Mealprep Batch Planning — Design Spec
+# Mealprep Batch Planning — Documentación
 
 Fecha: 2026-09-24
 
@@ -12,14 +12,21 @@ tres recetas).
 
 ## 2. Objetivo
 
-Agregar un feature "Mealprep" que, a partir del plan ya generado, le pregunte al usuario
-cómo va a distribuir su tiempo de cocina esa semana (en cuántas sesiones, qué días, cuántas
-horas por sesión) y genere un plan de batch-cooking: fases con tareas agrupadas entre
-recetas, con tiempos estimados, para reducir el tiempo total en cocina.
+Agregar un feature "Mealprep" que, a partir del plan ya generado (cualquiera sea su
+cantidad de días), le pregunte al usuario cómo va a distribuir su tiempo de cocina (en
+cuántas sesiones, qué días, cuántas horas por sesión) y genere un plan de batch-cooking:
+fases con tareas agrupadas entre recetas, con tiempos estimados, para reducir el tiempo
+total en cocina.
 
 ## 3. Alcance
 
-- Aplica a **cualquier plan generado** (diario = 1 día, semanal = 7 días), no solo semanal.
+- Aplica a **cualquier plan generado**, sin asumir una cantidad fija de días. Hoy
+  `Planner.tsx` solo genera 1 día (`daily`) o 7 días (`weekly`), pero Mealprep no debe
+  hardcodear ese binario — debe leer **N = cantidad real de días que trae el plan**
+  (`Array.isArray(plan) ? plan.length : 1`). Así, si en el futuro el Planner permite
+  elegir una cantidad arbitraria de días, Mealprep sigue funcionando sin cambios.
+  Agregar ese selector de N días al Planner queda **fuera de alcance de este trabajo**
+  (ver sección 9).
 - Parte siempre del plan ya generado en el Planner — no hay selección manual de recetas
   del Cookbook para esto (YAGNI: ya existe una entrada de datos clara, no hace falta una
   segunda).
@@ -28,8 +35,8 @@ recetas, con tiempos estimados, para reducir el tiempo total en cocina.
 
 ## 4. Flujo de usuario
 
-1. En `Planner.tsx`, si `plan` no es null (diario o semanal), aparece un botón "Mealprep"
-   que navega a la ruta nueva `/mealprep`.
+1. En `Planner.tsx`, si `plan` no es null (sin importar cuántos días tenga), aparece un
+   botón "Mealprep" que navega a la ruta nueva `/mealprep`.
 2. Al entrar a `/mealprep`:
    - Si hay un mealprep guardado en progreso (algún check marcado, no 100% completo) **y**
      sigue correspondiendo al plan actual del Planner → se muestra directo el checklist
@@ -41,13 +48,12 @@ recetas, con tiempos estimados, para reducir el tiempo total en cocina.
      aplican.
    - Si no hay nada guardado → cuestionario de entrada.
 3. Cuestionario de entrada (siempre se pregunta de cero al generar un mealprep nuevo, no
-   se guardan defaults):
-   - Si el plan es diario (1 día): se salta la pregunta de reparto de días — hay una sola
-     sesión implícita — y solo se pregunta cuántos minutos/horas tiene disponibles.
-   - Si el plan es semanal (7 días): "¿en cuántos días vas a cocinar esta semana?" (1-7)
-     → elegir reparto automático de los 7 días entre esas sesiones, o asignar manualmente
-     qué días cubre cada sesión → minutos/horas disponibles por cada sesión
-     individualmente.
+   se guardan defaults). Sea N la cantidad de días del plan actual:
+   - Si N = 1: se salta la pregunta de reparto de días — hay una sola sesión implícita —
+     y solo se pregunta cuántos minutos/horas tiene disponibles.
+   - Si N > 1: "¿en cuántos días vas a cocinar?" (1 a N) → elegir reparto automático de
+     los N días entre esas sesiones, o asignar manualmente qué días cubre cada sesión →
+     minutos/horas disponibles por cada sesión individualmente.
 4. Al enviar el cuestionario, el frontend arma el payload (recetas de los días de cada
    sesión + parámetros) y llama a `POST /api/mealprep/generate`.
 5. El resultado se muestra como checklist agrupado por sesión → fase → tarea. Marcar una
@@ -146,7 +152,12 @@ Notas:
   agrega a la navegación inferior; se llega solo desde el botón en `Planner.tsx`).
 - Reparto automático de días entre sesiones: lógica pura de cliente (split contiguo de
   los N días entre las sesiones elegidas), sin llamar al backend.
-- Reparto manual: 7 chips (Lun-Dom), cada uno con selector de a qué sesión pertenece.
+- Reparto manual: N chips (uno por día del plan, etiquetados Lun-Dom cuando N = 7, o
+  "Día 1", "Día 2", etc. en otro caso), cada uno con selector de a qué sesión pertenece.
+- Recordatorio de Pantry: en la pantalla de resultados (checklist), un banner fijo tipo
+  "Recuerda actualizar tu Pantry con lo que ya tienes en la cocina antes de empezar" —
+  texto estático, sin cruzar inventario contra ingredientes (ver sección 9, por qué no se
+  hace ese cruce).
 - Reutiliza el patrón de modal/wizard que ya tiene `Planner.tsx` para el cuestionario.
 
 ## 8. Persistencia y cache
@@ -155,7 +166,7 @@ Notas:
   mecanismo que `currentMealPlan` (key `app_mealplan`).
 - El objeto guardado incluye: el plan completo devuelto por el backend + el estado
   `completed` de cada tarea + una referencia al plan del Planner del que se generó (para
-  poder detectar que quedó obsoleto si el usuario regenera el plan semanal/diario).
+  poder detectar que quedó obsoleto si el usuario regenera el plan).
 - No se crea ninguna tabla nueva en `models.py` — es un cambio deliberado de YAGNI: no
   hay auth ni multi-dispositivo, y el patrón existente de la app ya resuelve
   "recordar el último plan" del mismo modo.
@@ -165,8 +176,16 @@ Notas:
 - Selección manual de recetas del Cookbook para armar una sesión de mealprep ad-hoc.
 - Sincronización del progreso entre dispositivos (queda solo en el `idb-keyval` local).
 - Persistencia del cuestionario de entrada como default (se pregunta siempre de cero).
-- Integración con Pantry/Grocery list (este feature es sobre orden y tiempo de cocina,
-  no sobre qué comprar).
+- Agregar al Planner un selector de cantidad arbitraria de días (hoy es solo
+  daily/weekly) — Mealprep queda preparado para consumirlo si se agrega después, pero
+  no se toca `Planner.tsx`/`rag_planner.py` en este trabajo.
+- Integración con Grocery list — no tiene relación directa con el orden/tiempo de
+  cocina.
+- Cruzar el inventario del Pantry contra las tareas generadas (ej. desactivar "picar
+  cebolla" si no hay cebolla en Pantry). Esto requeriría que el backend consulte Pantry
+  y que el LLM razone sobre disponibilidad real de ingredientes — mucho más alcance para
+  un beneficio marginal. En su lugar, se agrega el recordatorio estático de la sección 7:
+  el usuario decide si su Pantry está al día antes de empezar.
 
 ## 10. Notas de implementación
 

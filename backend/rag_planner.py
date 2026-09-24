@@ -20,9 +20,9 @@ class RAGMealPlanner:
         
         candidates_by_meal = {}
         all_candidates_context = ""
-        
+
         total_target_cals = target_macros.get("calorias", 2000)
-        
+
         percentages = {}
         if len(meal_structure) == 3:
             percentages = {m: 0.333 for m in meal_structure}
@@ -34,7 +34,7 @@ class RAGMealPlanner:
                 if "desayuno" in ml: percentages[m] = 0.25
                 elif "almuerzo" in ml or "comida" in ml: percentages[m] = 0.30
                 elif "cena" in ml: percentages[m] = 0.20
-                else: 
+                else:
                     # snacks
                     if idx == 1: percentages[m] = 0.15 # Media mañana
                     else: percentages[m] = 0.10 # Merienda
@@ -104,7 +104,7 @@ class RAGMealPlanner:
                 valid_results = results[:n_results]
                 
             candidates_by_meal[meal_type] = valid_results
-            
+
             all_candidates_context += f"\n--- Candidatos para {meal_type.upper()} (Objetivo: ~{int(meal_cals)} kcal) ---\n"
             for r in valid_results:
                 all_candidates_context += (
@@ -147,7 +147,7 @@ Metas Diarias:
 - Calorías Totales: ~{target_macros.get('calorias', 2000)} kcal
 - Proteínas: ~{target_macros.get('proteinas', 150)} g
 - Carbohidratos: ~{target_macros.get('carbohidratos', 200)} g
-- Grasas: ~{target_macros.get('grasas', 60)} g
+- Grasas: ~{target_macros.get('grasas', 60)} g{f"{chr(10)}- Azúcares: máximo ~{target_macros.get('azucares')} g" if target_macros.get('azucares') else ""}{f"{chr(10)}- Fibra: mínimo ~{target_macros.get('fibra')} g" if target_macros.get('fibra') else ""}
 
 Perfil del Usuario:
 - Fase del ciclo menstrual / Estado: {cycle_phase if cycle_phase else 'No especificada'}
@@ -160,8 +160,9 @@ Asegúrate de que la suma de macros DIARIA se acerque a las metas.
 
 Reglas Estrictas de Selección:
 - REGLA ABSOLUTA: Tienes que devolver EXACTAMENTE 1 receta para CADA UNO de los tipos de comida solicitados. Es PREFERIBLE pasarse o quedarse corto en los macros antes que omitir una comida. NO omitas ninguna comida bajo ninguna circunstancia.
-- Prohibido seleccionar recetas que sean claramente dips, quesos, aderezos, condimentos o snacks muy ligeros para comidas principales (Desayuno, Almuerzo, Cena). Estas solo deben ir como Snack o Postre.
-- Cada comida debe ser lógica y apropiada para su horario (ej. un desayuno debe ser un plato fuerte de desayuno, no un queso crema).
+- Prohibido seleccionar recetas que sean claramente dips, quesos, aderezos, condimentos, POLVOS o SUPLEMENTOS (como "magnesio en polvo") para snacks o comidas principales. Los snacks deben ser comidas o alimentos reales (ej. galletas, fruta, yogur, etc.).
+- Cada comida debe ser lógica y apropiada para su horario.
+- DIVERSIDAD DE DÍAS: Si estás generando múltiples días, asegúrate de crear al menos 4 o 5 días COMPLETAMENTE DIFERENTES. Puedes repetir las comidas de 1 o 2 días, pero la mayoría de la semana debe tener variedad. No repitas la misma estructura los 7 días.
 
 Devuelve tu selección como un objeto JSON estricto con este formato:
 {json_format}

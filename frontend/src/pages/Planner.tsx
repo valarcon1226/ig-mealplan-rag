@@ -4,7 +4,7 @@ import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, Chevro
 import { Recipe } from '../lib/types';
 
 export default function Planner() {
-  const { profile, recipes, updateDailyConsumption, dailyConsumption } = useStore();
+  const { profile, recipes, updateDailyConsumption, dailyConsumption, setCurrentMealPlan } = useStore();
   const [plan, setPlan] = useState<any>(null); // puede ser array o objeto
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -59,8 +59,10 @@ export default function Planner() {
       if (!res.ok) {
         alert(data.error || "Failed to generate plan");
         setPlan(null);
+        setCurrentMealPlan(null);
       } else {
         setPlan(data);
+        setCurrentMealPlan(data);
         setCurrentDayIndex(0);
       }
     } catch (err) {
@@ -243,7 +245,6 @@ export default function Planner() {
               </div>
             </>
           )}
-          
           <button
             onClick={() => setShowModal(true)}
             disabled={loading}

@@ -4,9 +4,10 @@ import { StoreProvider, useStore } from './lib/store';
 import Dashboard from './pages/Dashboard';
 import Cookbook from './pages/Cookbook';
 import Planner from './pages/Planner';
+import Pantry from './pages/Pantry';
 import Profile from './pages/Profile';
 import RecipeImport from './pages/RecipeImport';
-import { Home, Book, Calendar, User, PlusCircle } from 'lucide-react';
+import { Home, Book, Calendar, User, ShoppingBag } from 'lucide-react';
 import { cn } from './lib/cn';
 import { Toaster } from 'react-hot-toast';
 
@@ -15,8 +16,8 @@ function Navigation() {
   const navItems = [
     { path: '/', icon: Home, label: 'Dash' },
     { path: '/cookbook', icon: Book, label: 'Cookbook' },
-    { path: '/import', icon: PlusCircle, label: 'Add Recipe' },
     { path: '/planner', icon: Calendar, label: 'Plan' },
+    { path: '/pantry', icon: ShoppingBag, label: 'Pantry' },
     { path: '/profile', icon: User, label: 'Profile' },
   ];
 
@@ -72,8 +73,8 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/cookbook" element={<Cookbook />} />
-            <Route path="/import" element={<RecipeImport />} />
             <Route path="/planner" element={<Planner />} />
+            <Route path="/pantry" element={<Pantry />} />
             <Route path="/profile" element={<Profile />} />
           </Routes>
         </PwaLayout>

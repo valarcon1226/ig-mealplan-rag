@@ -1,6 +1,7 @@
 # Mealprep Batch Planning — Documentación
 
 Fecha: 2026-09-24
+Actualizado: 2026-09-25
 
 ## 1. Problema
 
@@ -20,13 +21,12 @@ total en cocina.
 
 ## 3. Alcance
 
-- Aplica a **cualquier plan generado**, sin asumir una cantidad fija de días. Hoy
-  `Planner.tsx` solo genera 1 día (`daily`) o 7 días (`weekly`), pero Mealprep no debe
-  hardcodear ese binario — debe leer **N = cantidad real de días que trae el plan**
-  (`Array.isArray(plan) ? plan.length : 1`). Así, si en el futuro el Planner permite
-  elegir una cantidad arbitraria de días, Mealprep sigue funcionando sin cambios.
-  Agregar ese selector de N días al Planner queda **fuera de alcance de este trabajo**
-  (ver sección 9).
+- Aplica a **cualquier plan generado**, sin asumir una cantidad fija de días. Mealprep
+  lee **N = cantidad real de días que trae el plan**
+  (`Array.isArray(plan) ? plan.length : 1`). `Planner.tsx` ahora deja elegir cualquier
+  N entre 1 y 14 (input numérico, reemplazó el toggle Daily/Weekly original) — Mealprep
+  no necesitó ningún cambio cuando se agregó eso, porque ya estaba preparado para leerlo
+  genéricamente desde el día 1.
 - Parte siempre del plan ya generado en el Planner — no hay selección manual de recetas
   del Cookbook para esto (YAGNI: ya existe una entrada de datos clara, no hace falta una
   segunda).
@@ -49,11 +49,19 @@ total en cocina.
    - Si no hay nada guardado → cuestionario de entrada.
 3. Cuestionario de entrada (siempre se pregunta de cero al generar un mealprep nuevo, no
    se guardan defaults). Sea N la cantidad de días del plan actual:
-   - Si N = 1: se salta la pregunta de reparto de días — hay una sola sesión implícita —
-     y solo se pregunta cuántos minutos/horas tiene disponibles.
-   - Si N > 1: "¿en cuántos días vas a cocinar?" (1 a N) → elegir reparto automático de
-     los N días entre esas sesiones, o asignar manualmente qué días cubre cada sesión →
-     minutos/horas disponibles por cada sesión individualmente.
+   - Si N = 1: se salta el builder de sesiones — hay una sola sesión implícita — y solo
+     se pregunta cuántos minutos tiene disponibles.
+   - Si N > 1: **builder secuencial de sesiones** (rediseñado el 2026-09-25 — el diseño
+     original de "elige cuántas sesiones + auto-split o asignación manual por día" no
+     modelaba bien un ritmo real de batch-cooking, ej. cocinar domingo para lunes y
+     martes, martes para miércoles y jueves, jueves para viernes/sábado/domingo). Ahora
+     el usuario arma las sesiones una por una: cada sesión declara cuántos días
+     **consecutivos** cubre (empezando desde el día 1 del plan) y cuántos minutos tiene
+     esa sesión. Un indicador ("Cubres X de N días") y chips por día (con el número de
+     sesión, o gris si no tiene sesión) muestran la cobertura en vivo. **No es
+     obligatorio cubrir el 100% de los días** — si el usuario deja de agregar sesiones,
+     los días restantes (ej. un domingo que no va a cocinar) simplemente no generan
+     tareas de mealprep, no se fuerzan a entrar en alguna sesión.
 4. Al enviar el cuestionario, el frontend arma el payload (recetas de los días de cada
    sesión + parámetros) y llama a `POST /api/mealprep/generate`.
 5. El resultado se muestra como checklist agrupado por sesión → fase → tarea. Marcar una
@@ -87,9 +95,10 @@ total en cocina.
 ```
 
 Notas:
-- El frontend ya resuelve qué días/recetas caen en cada sesión (auto-split o manual)
-  **antes** de llamar al backend — el backend no necesita saber si fue automático o
-  manual, ni tocar la base de datos para esto. Es stateless.
+- El frontend ya resuelve qué días/recetas caen en cada sesión (vía el builder
+  secuencial descrito en la sección 4) **antes** de llamar al backend — el backend
+  recibe directamente la lista de recetas por sesión, sin saber cómo se armó esa
+  distribución ni tocar la base de datos. Es stateless.
 - `ingredients`/`instructions` vienen tal cual ya existen en `currentMealPlan` (no hace
   falta volver a consultarlos por `recipe_id`).
 
@@ -145,15 +154,35 @@ Notas:
   prefijo `/api`, como ya pasó con `/api/pantry` — mismo fix, mismo patrón).
 - Manejo de errores: si el LLM no devuelve JSON parseable, `ValueError` →
   `HTTPException(400)`, igual que `generate_mealplan`.
+- **Completitud (fix 2026-09-25)**: se detectó que el plan de mealprep podía "perder"
+  recetas e ingredientes en el camino, por dos causas distintas:
+  1. `rag_planner.py` podía seleccionar recetas sin datos reales (posts de IG donde solo
+     se guardó el título/hashtags, ej. una receta con 0 ingredientes y una instrucción
+     placeholder tipo "la receta completa no fue proporcionada"). Ahora el retrieval de
+     candidatos filtra cualquier receta sin `ingredientes` en las tres rutas de
+     fallback (filtro estricto, filtro relajado, y el último recurso sin restricciones).
+  2. El prompt de `mealprep_planner.py` dejaba que el LLM resumiera la fase "Corte y
+     preparación" con frases vagas ("picar los vegetales para..."), perdiendo
+     ingredientes específicos en el camino (ej. nunca mencionaba pelar las papas de un
+     puré, o los aromáticos de una salsa). Se agregó una regla explícita de
+     completitud al prompt: cada `recipe_id` de la sesión debe quedar representado en
+     al menos una tarea, y cada ingrediente que necesite corte/pelado/picado debe
+     nombrarse explícitamente (no resumirse con frases genéricas).
 
 ## 7. Frontend
 
 - Nuevo archivo `frontend/src/pages/Mealprep.tsx` + ruta `/mealprep` en `App.tsx` (no se
   agrega a la navegación inferior; se llega solo desde el botón en `Planner.tsx`).
-- Reparto automático de días entre sesiones: lógica pura de cliente (split contiguo de
-  los N días entre las sesiones elegidas), sin llamar al backend.
-- Reparto manual: N chips (uno por día del plan, etiquetados Lun-Dom cuando N = 7, o
-  "Día 1", "Día 2", etc. en otro caso), cada uno con selector de a qué sesión pertenece.
+- Builder secuencial de sesiones (`sessions: {days, minutes}[]` en estado local): cada
+  fila deja editar cuántos días consecutivos cubre esa sesión y cuántos minutos tiene;
+  "+ Agregar sesión" añade otra fila. El día-a-sesión se deriva sumando
+  acumulativamente los `days` de cada sesión en orden (sesión 1 cubre los primeros
+  `days` días del plan, sesión 2 los siguientes, etc.) — todo lógica pura de cliente,
+  sin llamar al backend hasta el submit final.
+  - Cada fila tiene un clamp: no se puede poner un `days` que haga que la suma total
+    supere N (el máximo permitido para esa fila es `N - suma de las demás filas`).
+  - Chips por día (etiquetados Lun-Dom cuando N = 7, o "Día 1"/"Día 2" etc. en otro
+    caso) muestran en vivo a qué sesión cae cada día, o gris si quedó sin cubrir.
 - Recordatorio de Pantry: en la pantalla de resultados (checklist), un banner fijo tipo
   "Recuerda actualizar tu Pantry con lo que ya tienes en la cocina antes de empezar" —
   texto estático, sin cruzar inventario contra ingredientes (ver sección 9, por qué no se
@@ -176,9 +205,6 @@ Notas:
 - Selección manual de recetas del Cookbook para armar una sesión de mealprep ad-hoc.
 - Sincronización del progreso entre dispositivos (queda solo en el `idb-keyval` local).
 - Persistencia del cuestionario de entrada como default (se pregunta siempre de cero).
-- Agregar al Planner un selector de cantidad arbitraria de días (hoy es solo
-  daily/weekly) — Mealprep queda preparado para consumirlo si se agrega después, pero
-  no se toca `Planner.tsx`/`rag_planner.py` en este trabajo.
 - Integración con Grocery list — no tiene relación directa con el orden/tiempo de
   cocina.
 - Cruzar el inventario del Pantry contra las tareas generadas (ej. desactivar "picar

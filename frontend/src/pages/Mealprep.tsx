@@ -13,22 +13,7 @@ import { MealprepCache } from '../lib/types';
 
 type ViewState = 'loading' | 'no_plan' | 'questionnaire' | 'results';
 
-function autoSplitDays(numDays: number, numSessions: number): number[][] {
-  const base = Math.floor(numDays / numSessions);
-  const remainder = numDays % numSessions;
-  const groups: number[][] = [];
-  let dayIndex = 0;
-  for (let s = 0; s < numSessions; s++) {
-    const size = base + (s < remainder ? 1 : 0);
-    const group: number[] = [];
-    for (let i = 0; i < size; i++) {
-      group.push(dayIndex);
-      dayIndex++;
-    }
-    groups.push(group);
-  }
-  return groups;
-}
+type SessionInput = { days: number; minutes: number };
 
 const DAY_LABELS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 
@@ -48,16 +33,10 @@ export default function Mealprep() {
   const numDays = planDays.length;
   const fingerprint = buildPlanFingerprint(currentMealPlan);
 
-  const [numSessions, setNumSessions] = useState(1);
-  const [splitMode, setSplitMode] = useState<'auto' | 'manual'>('auto');
-  const [manualAssignment, setManualAssignment] = useState<number[]>([]);
-  const [minutesPerSession, setMinutesPerSession] = useState<number[]>([60]);
+  const [sessions, setSessions] = useState<SessionInput[]>([{ days: 1, minutes: 60 }]);
 
   const resetQuestionnaire = () => {
-    setNumSessions(1);
-    setSplitMode('auto');
-    setManualAssignment(new Array(numDays).fill(0));
-    setMinutesPerSession([60]);
+    setSessions([{ days: 1, minutes: 60 }]);
   };
 
   useEffect(() => {
@@ -79,48 +58,51 @@ export default function Mealprep() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fingerprint, numDays]);
 
-  const changeNumSessions = (n: number) => {
-    setNumSessions(n);
-    setMinutesPerSession(new Array(n).fill(60));
-    setManualAssignment(new Array(numDays).fill(0));
-  };
-
-  const assignDayToSession = (dayIdx: number, sessionIdx: number) => {
-    setManualAssignment((prev) => {
+  const updateSessionDays = (idx: number, days: number) => {
+    setSessions((prev) => {
+      const otherTotal = prev.reduce((sum, s, i) => (i === idx ? sum : sum + s.days), 0);
+      const maxAllowed = Math.max(1, numDays - otherTotal);
+      const clamped = Math.max(1, Math.min(maxAllowed, days || 1));
       const next = [...prev];
-      next[dayIdx] = sessionIdx;
+      next[idx] = { ...next[idx], days: clamped };
       return next;
     });
   };
 
-  const updateMinutes = (sessionIdx: number, minutes: number) => {
-    setMinutesPerSession((prev) => {
+  const updateSessionMinutes = (idx: number, minutes: number) => {
+    setSessions((prev) => {
       const next = [...prev];
-      next[sessionIdx] = minutes;
+      next[idx] = { ...next[idx], minutes };
       return next;
     });
+  };
+
+  const addSession = () => {
+    setSessions((prev) => [...prev, { days: 1, minutes: 60 }]);
+  };
+
+  const removeSession = (idx: number) => {
+    setSessions((prev) => prev.filter((_, i) => i !== idx));
   };
 
   const generateMealprep = async () => {
-    let sessionsDays: number[][];
-    if (numDays === 1) {
-      sessionsDays = [[0]];
-    } else if (splitMode === 'auto') {
-      sessionsDays = autoSplitDays(numDays, numSessions);
-    } else {
-      sessionsDays = Array.from({ length: numSessions }, (_, s) =>
-        manualAssignment
-          .map((sessionIdx, dayIdx) => ({ sessionIdx, dayIdx }))
-          .filter((x) => x.sessionIdx === s)
-          .map((x) => x.dayIdx)
-      );
-    }
+    let cursor = 0;
+    const activeSessions = sessions
+      .map((s) => {
+        const dayIndices: number[] = [];
+        for (let i = 0; i < s.days && cursor < numDays; i++) {
+          dayIndices.push(cursor);
+          cursor++;
+        }
+        return { minutes: s.minutes, dayIndices };
+      })
+      .filter((s) => s.dayIndices.length > 0);
 
     const payload = {
-      sessions: sessionsDays.map((dayIndices, i) => ({
+      sessions: activeSessions.map((s, i) => ({
         session_id: i + 1,
-        available_minutes: minutesPerSession[i] ?? 60,
-        recipes: dayIndices.flatMap((dayIdx) => {
+        available_minutes: s.minutes,
+        recipes: s.dayIndices.flatMap((dayIdx) => {
           const day = planDays[dayIdx];
           return (day.meals || []).map((m: any) => ({
             recipe_id: m.recipe_id,
@@ -214,6 +196,20 @@ export default function Mealprep() {
   }
 
   if (view === 'questionnaire') {
+    const totalDaysCovered = Math.min(numDays, sessions.reduce((sum, s) => sum + s.days, 0));
+    const remainingDays = numDays - totalDaysCovered;
+
+    const dayAssignments: (number | null)[] = new Array(numDays).fill(null);
+    {
+      let cursor = 0;
+      sessions.forEach((s, sIdx) => {
+        for (let i = 0; i < s.days && cursor < numDays; i++) {
+          dayAssignments[cursor] = sIdx;
+          cursor++;
+        }
+      });
+    }
+
     return (
       <div className="p-4 max-w-lg mx-auto space-y-6 pt-8 pb-20">
         <header className="mb-4">
@@ -223,96 +219,104 @@ export default function Mealprep() {
 
         {numDays > 1 && (
           <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 space-y-4">
-            <div>
-              <p className="text-sm text-neutral-400 mb-2">
-                ¿En cuántos días vas a cocinar? (de {numDays} días del plan)
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {Array.from({ length: numDays }, (_, i) => i + 1).map((n) => (
-                  <button
-                    key={n}
-                    onClick={() => changeNumSessions(n)}
-                    className={`w-10 h-10 rounded-lg font-bold text-sm ${
-                      numSessions === n ? 'bg-orange-500 text-black' : 'bg-black border border-neutral-800 text-neutral-400'
-                    }`}
-                  >
-                    {n}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <p className="text-sm text-neutral-400">
+              Cubres <span className="text-white font-bold">{totalDaysCovered}</span> de {numDays} días del plan
+            </p>
 
-            {numSessions > 1 && (
-              <div>
-                <p className="text-sm text-neutral-400 mb-2">¿Cómo repartimos los días?</p>
-                <div className="flex bg-black rounded-lg p-1 border border-neutral-800">
-                  <button
-                    onClick={() => setSplitMode('auto')}
-                    className={`flex-1 py-2 rounded-md text-sm font-bold ${
-                      splitMode === 'auto' ? 'bg-orange-500 text-black' : 'text-neutral-400'
-                    }`}
-                  >
-                    Automático
-                  </button>
-                  <button
-                    onClick={() => setSplitMode('manual')}
-                    className={`flex-1 py-2 rounded-md text-sm font-bold ${
-                      splitMode === 'manual' ? 'bg-orange-500 text-black' : 'text-neutral-400'
-                    }`}
-                  >
-                    Yo elijo
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {numSessions > 1 && splitMode === 'manual' && (
-              <div className="space-y-2">
-                {planDays.map((day, dayIdx) => (
+            <div className="flex flex-wrap gap-2">
+              {planDays.map((_, dayIdx) => {
+                const sIdx = dayAssignments[dayIdx];
+                return (
                   <div
                     key={dayIdx}
-                    className="flex items-center justify-between bg-black p-2 rounded-lg border border-neutral-800"
+                    className={`px-2 py-1 rounded-lg text-xs font-bold border ${
+                      sIdx === null
+                        ? 'bg-black border-neutral-800 text-neutral-600'
+                        : 'bg-orange-500/10 border-orange-500/30 text-orange-400'
+                    }`}
                   >
-                    <span className="text-sm text-white">{DAY_LABELS[dayIdx] || `Día ${dayIdx + 1}`}</span>
-                    <select
-                      value={manualAssignment[dayIdx] ?? 0}
-                      onChange={(e) => assignDayToSession(dayIdx, Number(e.target.value))}
-                      className="bg-neutral-900 border border-neutral-800 rounded-lg text-sm text-white px-2 py-1"
-                    >
-                      {Array.from({ length: numSessions }, (_, s) => (
-                        <option key={s} value={s}>
-                          Sesión {s + 1}
-                        </option>
-                      ))}
-                    </select>
+                    {DAY_LABELS[dayIdx] || `Día ${dayIdx + 1}`}
+                    {sIdx !== null && <span className="ml-1 text-neutral-500">S{sIdx + 1}</span>}
                   </div>
-                ))}
-              </div>
+                );
+              })}
+            </div>
+
+            {remainingDays > 0 && (
+              <p className="text-xs text-neutral-500">
+                {remainingDays} día{remainingDays > 1 ? 's' : ''} sin sesión todavía — agrega otra sesión para
+                cubrirlo{remainingDays > 1 ? 's' : ''}, o déjalo así si no vas a cocinar ese día.
+              </p>
+            )}
+
+            <div className="space-y-3">
+              {sessions.map((s, idx) => (
+                <div key={idx} className="bg-black border border-neutral-800 rounded-xl p-3 space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm font-bold text-white">Sesión {idx + 1}</span>
+                    {sessions.length > 1 && (
+                      <button
+                        onClick={() => removeSession(idx)}
+                        className="text-xs text-neutral-500 hover:text-red-400"
+                      >
+                        Quitar
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-neutral-400">¿Cuántos días cubre?</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={s.days}
+                      onChange={(e) => updateSessionDays(idx, Number(e.target.value))}
+                      className="w-16 bg-neutral-900 border border-neutral-800 rounded-lg text-sm text-white px-2 py-1 text-right"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-neutral-400">¿Cuántos minutos tienes?</span>
+                    <input
+                      type="number"
+                      min={10}
+                      step={5}
+                      value={s.minutes}
+                      onChange={(e) => updateSessionMinutes(idx, Number(e.target.value))}
+                      className="w-20 bg-neutral-900 border border-neutral-800 rounded-lg text-sm text-white px-2 py-1 text-right"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {remainingDays > 0 && (
+              <button
+                onClick={addSession}
+                className="w-full py-2 rounded-lg border border-dashed border-neutral-700 text-sm text-neutral-400 hover:text-white hover:border-neutral-500"
+              >
+                + Agregar sesión
+              </button>
             )}
           </div>
         )}
 
-        <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 space-y-3">
-          <p className="text-sm text-neutral-400">¿Cuántos minutos tienes disponibles en cada sesión?</p>
-          {Array.from({ length: numDays === 1 ? 1 : numSessions }, (_, i) => i).map((i) => (
-            <div key={i} className="flex items-center justify-between">
-              <span className="text-sm text-white">Sesión {i + 1}</span>
-              <input
-                type="number"
-                min={10}
-                step={5}
-                value={minutesPerSession[i] ?? 60}
-                onChange={(e) => updateMinutes(i, Number(e.target.value))}
-                className="w-24 bg-black border border-neutral-800 rounded-lg text-sm text-white px-2 py-1 text-right"
-              />
-            </div>
-          ))}
-        </div>
+        {numDays === 1 && (
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 space-y-3">
+            <p className="text-sm text-neutral-400">¿Cuántos minutos tienes disponibles?</p>
+            <input
+              type="number"
+              min={10}
+              step={5}
+              value={sessions[0]?.minutes ?? 60}
+              onChange={(e) => updateSessionMinutes(0, Number(e.target.value))}
+              className="w-full bg-black border border-neutral-800 rounded-lg text-sm text-white px-3 py-2 text-right"
+            />
+          </div>
+        )}
 
         <button
           onClick={generateMealprep}
-          disabled={loading}
-          className="w-full bg-orange-500 text-black font-bold py-3 rounded-xl flex items-center justify-center gap-2"
+          disabled={loading || sessions.length === 0}
+          className="w-full bg-orange-500 text-black font-bold py-3 rounded-xl flex items-center justify-center gap-2 disabled:opacity-50"
         >
           {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Generar Mealprep'}
         </button>

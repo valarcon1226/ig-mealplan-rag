@@ -67,6 +67,10 @@ class RAGMealPlanner:
             # Filtrar estrictamente por tag y restricciones en python
             valid_results = []
             for res in results:
+                if not res.get("ingredientes"):
+                    # Recetas sin ingredientes son posts de IG donde no se
+                    # guardo la receta completa -- no hay nada que cocinar.
+                    continue
                 tags = [t.strip().lower() for t in res.get("tags", "").split(",")]
                 if meal_type.lower() not in tags:
                     continue
@@ -91,6 +95,8 @@ class RAGMealPlanner:
                     n_results=100
                 )
                 for res in results:
+                    if not res.get("ingredientes"):
+                        continue
                     tags = [t.strip().lower() for t in res.get("tags", "").split(",")]
                     if meal_type.lower() not in tags:
                         continue
@@ -108,7 +114,7 @@ class RAGMealPlanner:
                 
             # Si a pesar de relajar calorias sigue sin haber por las restricciones, usamos los mas relevantes sin restriccion estricta
             if not valid_results:
-                valid_results = results[:n_results]
+                valid_results = [r for r in results if r.get("ingredientes")][:n_results]
                 
             all_candidates_context += f"\n--- Candidatos para {slot_key.upper()} (tipo: {meal_type}, Objetivo: ~{int(meal_cals)} kcal) ---\n"
             for r in valid_results:

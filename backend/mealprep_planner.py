@@ -73,6 +73,20 @@ Para cada sesión debes devolver fases, en este orden fijo cuando aplique:
 3. "Cocción pasiva" (horno, olla, algo que se deja cocinando solo)
 4. "Ensamblaje y almacenamiento"
 
+REGLA CRÍTICA DE COMPLETITUD (no la incumplas para acortar el plan):
+- CADA receta de la sesión debe quedar representada en al menos una tarea de
+  alguna fase. Antes de responder, revisa que ningún recipe_id de los
+  indicados abajo quede fuera de todas las tareas.
+- En "Corte y preparación", menciona EXPLÍCITAMENTE por su nombre cada
+  ingrediente de la lista combinada que requiera cortar, pelar, picar o medir
+  -- no los resumas con frases genéricas como "los vegetales" o "los
+  condimentos". Si varias recetas comparten un ingrediente, agrúpalo en una
+  sola tarea, pero nombra cada ingrediente individual dentro del texto.
+- No omitas pasos importantes de las instrucciones originales (marinar,
+  dejar reposar, precalentar el horno, pelar, etc.) solo por acortar el plan
+  -- es preferible una tarea más larga y completa que una corta que se salte
+  pasos.
+
 Cada tarea debe indicar cuánto tiempo estimado toma (estimated_minutes) y a qué
 recetas aplica (recipe_ids, usando los IDs indicados en cada receta).
 

@@ -1,35 +1,57 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useStore } from '../lib/store';
-import { Search, Plus, RefreshCw } from 'lucide-react';
+import { Search, Plus } from 'lucide-react';
 import { Recipe } from '../lib/types';
+import RecipeImport from './RecipeImport';
 
 export default function Cookbook() {
-  const { recipes, updateDailyConsumption, dailyConsumption, addRecipe, updateRecipe, setAllRecipes } = useStore();
+  const { recipes, updateDailyConsumption, dailyConsumption, setAllRecipes } = useStore();
+  const [activeTab, setActiveTab] = useState<'recipes' | 'add'>('recipes');
+  
+  return (
+    <div className="p-4 max-w-lg mx-auto space-y-6 pt-8 pb-24">
+      <header className="mb-6">
+        <h1 className="text-3xl font-bold tracking-tight text-white mb-4">Cookbook</h1>
+        <div className="flex bg-neutral-900 rounded-xl p-1 mb-6 border border-neutral-800">
+          <button 
+            onClick={() => setActiveTab('recipes')}
+            className={`flex-1 py-2 text-sm font-bold rounded-lg transition-colors ${activeTab === 'recipes' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300'}`}
+          >
+            Recipes
+          </button>
+          <button 
+            onClick={() => setActiveTab('add')}
+            className={`flex-1 py-2 text-sm font-bold rounded-lg transition-colors ${activeTab === 'add' ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300'}`}
+          >
+            Add Recipe
+          </button>
+        </div>
+      </header>
+
+      {activeTab === 'recipes' && <RecipesTab recipes={recipes} setAllRecipes={setAllRecipes} dailyConsumption={dailyConsumption} updateDailyConsumption={updateDailyConsumption} />}
+      {activeTab === 'add' && <RecipeImport />}
+    </div>
+  );
+}
+
+function RecipesTab({ recipes, setAllRecipes, dailyConsumption, updateDailyConsumption }: any) {
   const [search, setSearch] = useState('');
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
   const [loadingBackend, setLoadingBackend] = useState(false);
 
   useEffect(() => {
-    // Ver recetas from Backend
     const fetchRecipes = async () => {
       setLoadingBackend(true);
       try {
-        const res = await fetch("/api/recipes", {
-          method: "GET"
-        });
+        const res = await fetch("/api/recipes", { method: "GET" });
         if (res.ok) {
           const data = await res.json();
-          // Assuming backend returns an array of recipes
           const backendRecipes = Array.isArray(data) ? data : data.recipes || [];
-          
-          // Instead of looping (which causes closure stale state bugs), 
-          // we merge local and backend, and set them all at once.
           const localRecipes = [...recipes];
           const currentIds = new Set(localRecipes.map(r => String(r.id)));
           
           for (const newRecipe of backendRecipes) {
-            newRecipe.id = String(newRecipe.id); // Ensure string ID
+            newRecipe.id = String(newRecipe.id);
             if (newRecipe.macros) {
               if (!currentIds.has(newRecipe.id)) {
                 localRecipes.push({ ...newRecipe, id: newRecipe.id || crypto.randomUUID() });
@@ -42,42 +64,20 @@ export default function Cookbook() {
           setAllRecipes(localRecipes);
         }
       } catch (err) {
-        console.error("Error fetching recipes from ngrok:", err);
+        console.error("Error fetching recipes:", err);
       } finally {
         setLoadingBackend(false);
       }
     };
-    
     fetchRecipes();
-  }, []); // Run once on mount
-
-  const allTags = useMemo(() => {
-    const tags = new Set<string>();
-    recipes.forEach(r => r.categories.forEach(c => tags.add(c.toLowerCase())));
-    return Array.from(tags).sort();
-  }, [recipes]);
-
-  const toggleTag = (tag: string) => {
-    setSelectedTags(prev => 
-      prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
-    );
-  };
+  }, []);
 
   const filteredRecipes = useMemo(() => {
-    return recipes.filter(r => {
-      const matchSearch = r.title.toLowerCase().includes(search.toLowerCase()) || r.categories.some(c => c.toLowerCase().includes(search.toLowerCase()));
-      if (!matchSearch) return false;
-      
-      // Match all selected tags
-      if (selectedTags.length > 0) {
-        const recipeTags = r.categories.map(c => c.toLowerCase());
-        const hasAllTags = selectedTags.every(t => recipeTags.includes(t));
-        if (!hasAllTags) return false;
-      }
-
-      return true;
-    }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  }, [recipes, search, selectedTags]);
+    return recipes.filter((r: Recipe) => {
+      const matchSearch = r.title.toLowerCase().includes(search.toLowerCase()) || r.categories.some((c: string) => c.toLowerCase().includes(search.toLowerCase()));
+      return matchSearch;
+    }).sort((a: Recipe, b: Recipe) => (b.createdAt || 0) - (a.createdAt || 0));
+  }, [recipes, search]);
 
   const eatRecipe = (recipe: Recipe) => {
     updateDailyConsumption({
@@ -94,22 +94,17 @@ export default function Cookbook() {
   };
 
   return (
-    <div className="p-4 max-w-lg mx-auto space-y-6 pt-8">
-      <header className="mb-6">
-        <h1 className="text-3xl font-bold tracking-tight text-white mb-4">Cookbook</h1>
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
-          <input 
-            type="text" 
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search recipes, cravings..." 
-            className="w-full bg-neutral-900 border border-neutral-800 text-white rounded-xl py-3 pl-10 pr-4 text-sm focus:outline-none focus:border-orange-500 transition-colors"
-          />
-        </div>
-        
-
-      </header>
+    <>
+      <div className="relative mb-6">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
+        <input 
+          type="text" 
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search recipes, cravings..." 
+          className="w-full bg-neutral-900 border border-neutral-800 text-white rounded-xl py-3 pl-10 pr-4 text-sm focus:outline-none focus:border-orange-500 transition-colors"
+        />
+      </div>
 
       {filteredRecipes.length === 0 ? (
         <div className="text-center py-20 text-neutral-500">
@@ -118,7 +113,7 @@ export default function Cookbook() {
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {filteredRecipes.map(recipe => (
+          {filteredRecipes.map((recipe: Recipe) => (
             <div 
               key={recipe.id} 
               onClick={() => setSelectedRecipe(recipe)}
@@ -132,7 +127,6 @@ export default function Cookbook() {
                     className="w-full h-full object-cover opacity-80"
                     referrerPolicy="no-referrer"
                     onError={(e) => {
-                      // Fallback si falla la imagen
                       (e.target as HTMLImageElement).src = 'https://placehold.co/600x400/1a1a1a/4a4a4a?text=No+Image';
                     }}
                   />
@@ -185,7 +179,7 @@ export default function Cookbook() {
 
               <h3 className="font-bold text-sm text-neutral-400 uppercase tracking-widest mb-3">Ingredients</h3>
               <ul className="mb-8 space-y-2">
-                {selectedRecipe.ingredients.map((ing, i) => (
+                {selectedRecipe.ingredients.map((ing: any, i: number) => (
                   <li key={i} className="text-sm flex justify-between border-b border-neutral-800/50 pb-2">
                     <span className="text-white">{ing.name}</span>
                     <span className="text-neutral-500">{ing.amount}</span>
@@ -195,7 +189,7 @@ export default function Cookbook() {
 
               <h3 className="font-bold text-sm text-neutral-400 uppercase tracking-widest mb-3">Instructions</h3>
               <ol className="space-y-4 mb-4">
-                {selectedRecipe.instructions.map((step, i) => (
+                {selectedRecipe.instructions.map((step: string, i: number) => (
                   <li key={i} className="text-sm text-neutral-300 flex gap-3">
                     <span className="text-orange-500 font-mono font-bold">{i + 1}.</span>
                     <span className="leading-relaxed">{step}</span>
@@ -216,7 +210,7 @@ export default function Cookbook() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 

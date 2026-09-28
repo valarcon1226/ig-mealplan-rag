@@ -23,6 +23,8 @@ export type Recipe = {
   createdAt: number;
   imageUrl?: string;
   thumbnail_url?: string;
+  video_url?: string;
+  media_id?: string; // id del post de IG; `id` es el id interno de SQLite
 };
 
 export type UserProfile = {

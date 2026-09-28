@@ -898,6 +898,7 @@ def get_all_recipes():
 
         result.append({
             "id": r.id,
+            "media_id": r.media_id,
             "title": r.nombre,
             "video_url": r.video_url,
             "thumbnail_url": r.thumbnail_url,

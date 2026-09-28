@@ -6,7 +6,6 @@ import { format } from 'date-fns';
 type StoreContextType = {
   recipes: Recipe[];
   setAllRecipes: (recipes: Recipe[]) => void;
-  setRecipes: (recipes: Recipe[]) => void;
   addRecipe: (recipe: Recipe) => void;
   deleteRecipe: (id: string) => void;
   updateRecipe: (id: string, updates: Partial<Recipe>) => void;

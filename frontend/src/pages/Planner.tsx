@@ -79,8 +79,8 @@ export default function Planner() {
   };
 
   const openRecipeDetails = (meal: any) => {
-    const recipeToOpen = {
-      id: meal.recipe_id,
+    const recipeToOpen: Recipe = {
+      id: String(meal.recipe_id),
       title: meal.nombre,
       thumbnail_url: meal.thumbnail_url,
       video_url: meal.video_url,
@@ -90,11 +90,15 @@ export default function Planner() {
         calories: meal.calorias || 0,
         protein: meal.proteinas || 0,
         carbs: meal.carbohidratos || 0,
-        fat: meal.grasas || 0
+        fat: meal.grasas || 0,
+        fiber: meal.fibra || 0,
+        sugar: meal.azucar || 0
       },
-      servings: 1
+      servings: 1,
+      categories: [],
+      createdAt: Date.now()
     };
-    setSelectedRecipe(recipeToOpen as Recipe);
+    setSelectedRecipe(recipeToOpen);
   };
 
   const eatRecipe = (recipe: Recipe) => {

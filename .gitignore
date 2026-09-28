@@ -24,3 +24,11 @@ backend/ig_state.json
 # Dev/test artifacts
 backend/test_video.mp4
 backend/static/thumbnails/
+
+# Local test/mock outputs
+uvicorn_test.log
+structured_meal_grocery.md
+backend/mock_plan_output.json
+backend/mock_search.py
+backend/meal_plan_7_days.md
+backend/generate_markdown.py

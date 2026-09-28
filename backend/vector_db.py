@@ -45,28 +45,53 @@ def infer_dietary_restrictions(recipe: Dict[str, Any]) -> List[str]:
     return sorted(list(restrictions))
 
 def load_recipes_data() -> List[Dict[str, Any]]:
-    """Loads recipes from the local backup JSON DB."""
-    if not os.path.exists(RECIPES_FILE):
-        print(f"File not found: {RECIPES_FILE}")
-        return []
-    
-    with open(RECIPES_FILE, 'r', encoding='utf-8-sig') as f:
-        data = json.load(f)
-    
-    recipes_list = []
-    # recetas_saludables_backup.json has a "posts" array
-    posts = data.get("posts", [])
-    for post in posts:
-        ai_analysis = post.get("ai_analysis", {})
-        if ai_analysis and ai_analysis.get("is_recipe"):
-            # Ensure it has an ID, force it to be post.get("media_id") to match SQLite
-            ai_analysis["id"] = post.get("media_id")
-            if not ai_analysis["id"]:
-                continue
-            recipes_list.append(ai_analysis)
-    
-    print(f"Loaded {len(recipes_list)} recipes from database.")
-    return recipes_list
+    """
+    Carga las recetas desde SQLite - la fuente real desde que run_recipe_pipeline
+    persiste ahí (ver recipe_store.py). Antes esto leía recetas_saludables_backup.json
+    -> post["ai_analysis"], un campo que el pipeline en vivo nunca escribe, así que
+    ninguna receta procesada por la app terminaba indexada en Chroma.
+    """
+    from database import SessionLocal
+    from models import Recipe
+
+    db = SessionLocal()
+    try:
+        recipes = db.query(Recipe).filter(Recipe.nombre.isnot(None)).all()
+        recipes_list = []
+        for r in recipes:
+            try:
+                ingredientes = json.loads(r.ingredients_raw) if r.ingredients_raw else []
+            except Exception:
+                ingredientes = []
+            try:
+                instrucciones = json.loads(r.instructions) if r.instructions else []
+            except Exception:
+                instrucciones = []
+
+            recipes_list.append({
+                "id": r.media_id,
+                "nombre": r.nombre,
+                "tags": [t.strip() for t in (r.tags or "").split(",") if t.strip()],
+                "cuisine_type": r.cuisine_type,
+                "dificultad": r.dificultad,
+                "ingredientes": ingredientes,
+                "instrucciones": instrucciones,
+                "tiempo_preparacion_min": r.tiempo_preparacion_min,
+                "video_url": r.video_url,
+                "thumbnail_url": r.thumbnail_url,
+                "nutricion_por_porcion": {
+                    "calorias": r.nutrition.calories if r.nutrition else 0,
+                    "proteina_g": r.nutrition.proteins if r.nutrition else 0,
+                    "carbohidratos_g": r.nutrition.carbohydrates if r.nutrition else 0,
+                    "grasa_g": r.nutrition.fats if r.nutrition else 0,
+                    "azucares_g": r.nutrition.sugars if r.nutrition else None,
+                    "fibra_g": r.nutrition.fiber if r.nutrition else None,
+                } if r.nutrition else {},
+            })
+        print(f"Loaded {len(recipes_list)} recipes from SQLite.")
+        return recipes_list
+    finally:
+        db.close()
 
 def get_or_create_collection(client, collection_name: str = "recipes_collection"):
     """Gets or creates the ChromaDB collection with the sentence transformer embedding function."""
@@ -103,7 +128,15 @@ def populate_collection(collection, recipes: List[Dict[str, Any]]):
         tags = recipe.get("tags", [])
         if tags:
             text_parts.append(f"Etiquetas: {', '.join(tags)}")
-            
+
+        cuisine_type = recipe.get("cuisine_type")
+        if cuisine_type:
+            text_parts.append(f"Tipo de cocina: {cuisine_type}")
+
+        dificultad = recipe.get("dificultad")
+        if dificultad:
+            text_parts.append(f"Dificultad: {dificultad}")
+
         # Add ingredients
         ingredientes = recipe.get("ingredientes_ajustados") or recipe.get("ingredientes", [])
         ing_texts = []
@@ -124,7 +157,14 @@ def populate_collection(collection, recipes: List[Dict[str, Any]]):
         if nutricion:
             calorias = nutricion.get("calorias", 0)
             proteina = nutricion.get("proteina_g", 0)
-            text_parts.append(f"Nutrición: {calorias} kcal, {proteina}g proteína por porción.")
+            azucar = nutricion.get("azucares_g")
+            fibra = nutricion.get("fibra_g")
+            nut_text = f"Nutrición: {calorias} kcal, {proteina}g proteína"
+            if azucar is not None:
+                nut_text += f", {azucar}g azúcar"
+            if fibra is not None:
+                nut_text += f", {fibra}g fibra"
+            text_parts.append(nut_text + " por porción.")
             
         tiempo = recipe.get("tiempo_preparacion_min")
         if tiempo:
@@ -142,8 +182,12 @@ def populate_collection(collection, recipes: List[Dict[str, Any]]):
             "nombre": nombre,
             "calorias": float(nutricion.get("calorias", 0)) if isinstance(nutricion, dict) else 0.0,
             "proteina": float(nutricion.get("proteina_g", 0)) if isinstance(nutricion, dict) else 0.0,
+            "azucar": float(nutricion.get("azucares_g")) if isinstance(nutricion, dict) and nutricion.get("azucares_g") is not None else -1.0,
+            "fibra": float(nutricion.get("fibra_g")) if isinstance(nutricion, dict) and nutricion.get("fibra_g") is not None else -1.0,
             "tiempo": int(tiempo) if tiempo else 0,
             "tags": ", ".join(tags),
+            "cuisine_type": cuisine_type or "",
+            "dificultad": dificultad or "",
             "restricciones": ", ".join(restricciones),
             "ingredientes": ", ".join(ing_texts),
             "instrucciones": " | ".join(instrucciones),
@@ -182,6 +226,8 @@ def perform_similarity_search(collection, query: str, n_results: int = 5) -> Lis
             "calorias": results['metadatas'][0][i].get("calorias"),
             "proteina": results['metadatas'][0][i].get("proteina"),
             "tags": results['metadatas'][0][i].get("tags"),
+            "cuisine_type": results['metadatas'][0][i].get("cuisine_type"),
+            "dificultad": results['metadatas'][0][i].get("dificultad"),
             "restricciones": results['metadatas'][0][i].get("restricciones"),
             "ingredientes": results['metadatas'][0][i].get("ingredientes"),
             "instrucciones": results['metadatas'][0][i].get("instrucciones"),
@@ -189,22 +235,34 @@ def perform_similarity_search(collection, query: str, n_results: int = 5) -> Lis
             "similarity_score": similarity_score
         }
         formatted_results.append(res)
-        
+
     return formatted_results
 
-def perform_filtered_search(collection, query: str, min_calories: float = None, max_calories: float = None, min_protein: float = None, max_time: int = None, n_results: int = 5) -> List[Dict[str, Any]]:
+def perform_filtered_search(collection, query: str, min_calories: float = None, max_calories: float = None, min_protein: float = None, max_time: int = None, max_sugar: float = None, min_fiber: float = None, cuisine_type: str = None, dificultad: str = None, n_results: int = 5) -> List[Dict[str, Any]]:
     filters = []
-    
+
     if min_calories is not None:
         filters.append({"calorias": {"$gte": min_calories}})
     if max_calories is not None:
         filters.append({"calorias": {"$lte": max_calories}})
-        
+
     if min_protein is not None:
         filters.append({"proteina": {"$gte": min_protein}})
     if max_time is not None:
         filters.append({"tiempo": {"$lte": max_time}})
-        
+
+    # azucar/fibra usan -1.0 como sentinel de "no calculado" (ver populate_collection).
+    # Se exige >=0 explícitamente para no dejar pasar recetas sin dato en un filtro de máximo.
+    if max_sugar is not None:
+        filters.append({"azucar": {"$gte": 0}})
+        filters.append({"azucar": {"$lte": max_sugar}})
+    if min_fiber is not None:
+        filters.append({"fibra": {"$gte": max(min_fiber, 0)}})
+    if cuisine_type is not None:
+        filters.append({"cuisine_type": cuisine_type.lower().strip()})
+    if dificultad is not None:
+        filters.append({"dificultad": dificultad.lower().strip()})
+
     where_clause = None
     if len(filters) == 1:
         where_clause = filters[0]
@@ -229,13 +287,17 @@ def perform_filtered_search(collection, query: str, min_calories: float = None, 
             "nombre": results['metadatas'][0][i].get("nombre"),
             "calorias": results['metadatas'][0][i].get("calorias"),
             "proteina": results['metadatas'][0][i].get("proteina"),
+            "azucar": (lambda v: None if v is None or v < 0 else v)(results['metadatas'][0][i].get("azucar")),
+            "fibra": (lambda v: None if v is None or v < 0 else v)(results['metadatas'][0][i].get("fibra")),
             "tiempo": results['metadatas'][0][i].get("tiempo"),
             "tags": results['metadatas'][0][i].get("tags"),
+            "cuisine_type": results['metadatas'][0][i].get("cuisine_type"),
+            "dificultad": results['metadatas'][0][i].get("dificultad"),
             "restricciones": results['metadatas'][0][i].get("restricciones"),
             "ingredientes": results['metadatas'][0][i].get("ingredientes"),
             "instrucciones": results['metadatas'][0][i].get("instrucciones"),
             "similarity_score": similarity_score
         }
         formatted_results.append(res)
-        
+
     return formatted_results

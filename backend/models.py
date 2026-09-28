@@ -54,6 +54,8 @@ class NutritionInformation(Base):
     carbohydrates = Column(Float, default=0.0)
     proteins = Column(Float, default=0.0)
     calories = Column(Float, default=0.0)
+    sugars = Column(Float, default=0.0, nullable=True)
+    fiber = Column(Float, default=0.0, nullable=True)
 
     # Relación uno-a-uno con Recipe
     recipe = relationship("Recipe", back_populates="nutrition", uselist=False)
@@ -75,6 +77,8 @@ class Recipe(Base):
     tags = Column(String, nullable=True) # Comma-separated tags
     instructions = Column(String, nullable=True) # JSON list of strings
     ingredients_raw = Column(String, nullable=True) # JSON string of ingredients
+    cuisine_type = Column(String, nullable=True) # ej. "italiana", "mexicana", "asiática"
+    dificultad = Column(String, nullable=True) # "facil" | "media" | "dificil"
     
     nutrition_id = Column(Integer, ForeignKey("nutrition_information.id"), nullable=True)
     nutrition = relationship("NutritionInformation", back_populates="recipe")
@@ -161,3 +165,29 @@ class InventoryEntry(Base):
     
     food = relationship("Food", back_populates="inventory_entries")
     unit = relationship("Unit")
+
+class CollectionSyncState(Base):
+    """
+    Cuándo se sincronizó por última vez cada carpeta (colección) guardada
+    de Instagram. Se usa para no volver a pedirle datos a Instagram si ya
+    se sincronizó hace poco (TTL), y así reducir consumo/riesgo de rate
+    limit o challenges de seguridad.
+    """
+    __tablename__ = "collection_sync_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+    collection_id = Column(String, unique=True, index=True, nullable=False)
+    collection_name = Column(String, nullable=True)
+    last_synced_at = Column(DateTime, nullable=True)
+    posts_synced = Column(Integer, default=0)
+
+
+class PantryItem(Base):
+    """
+    Elemento en la Despensa (Pantry), texto libre
+    """
+    __tablename__ = "pantry_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True, nullable=False)
+    amount = Column(String, nullable=True)

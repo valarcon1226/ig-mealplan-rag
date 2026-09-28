@@ -1,6 +1,22 @@
 import yt_dlp
 import requests
 
+def download_via_ytdlp(url, output_path):
+    """
+    Descarga cualquier URL soportada por yt-dlp (TikTok, YouTube, IG público, etc.)
+    directamente, sin reconstruir nada a partir de un media_id. A diferencia de
+    download_ig_video (que reconstruye una URL de instagram.com/p/<shortcode> a
+    partir del media_id), esta función asume que ya tenés la URL real del post/video.
+    """
+    ydl_opts = {
+        'outtmpl': output_path,
+        'quiet': True,
+        'no_warnings': True,
+        'overwrites': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
 def get_shortcode_from_media_id(media_id_str):
     media_id = int(str(media_id_str).split('_')[0])
     alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'

@@ -19,6 +19,8 @@ type StoreContextType = {
   isLoading: boolean;
   loadFromCloud: (username: string) => Promise<void>;
   syncToCloud: () => Promise<void>;
+  currentMealPlan: any | null;
+  setCurrentMealPlan: (plan: any | null) => void;
 };
 
 const defaultProfile: UserProfile = {
@@ -39,7 +41,13 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     caloriesBurned: 0 
   });
   const [folderPosts, setFolderPosts] = useState<any[]>([]);
+  const [currentMealPlan, setCurrentMealPlanState] = useState<any | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
+  const setCurrentMealPlan = (plan: any | null) => {
+    setCurrentMealPlanState(plan);
+    set('app_mealplan', plan);
+  };
 
   const triggerSync = (currentProfile: UserProfile, currentRecipes: Recipe[]) => {
     if (!currentProfile.igUsername) return;
@@ -110,6 +118,12 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
       if (storedDaily && storedDaily.date === format(new Date(), 'yyyy-MM-dd')) {
         setDailyConsumption(storedDaily);
       }
+      
+      const storedPlan = await get('app_mealplan');
+      if (storedPlan) {
+        setCurrentMealPlanState(storedPlan);
+      }
+      
       setIsLoading(false);
     };
     loadData();
@@ -157,7 +171,7 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   };
 
   return (
-    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, profile, updateProfile, dailyConsumption, updateDailyConsumption, folderPosts, setFolderPosts, isLoading, loadFromCloud, syncToCloud }}>
+    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, profile, updateProfile, dailyConsumption, updateDailyConsumption, folderPosts, setFolderPosts, isLoading, loadFromCloud, syncToCloud, currentMealPlan, setCurrentMealPlan }}>
       {children}
     </StoreContext.Provider>
   );

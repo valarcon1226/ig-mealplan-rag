@@ -123,6 +123,7 @@ Notas:
             }
           ]
         },
+        { "phase_name": "Preparación previa (día anterior)", "tasks": [] },
         { "phase_name": "Cocción activa", "tasks": [] },
         { "phase_name": "Cocción pasiva (horno / olla)", "tasks": [] },
         { "phase_name": "Ensamblaje y almacenamiento", "tasks": [] }
@@ -132,9 +133,15 @@ Notas:
 }
 ```
 
-- Si `available_minutes` no alcanza para todas las tareas de una sesión, `warning` trae un
-  mensaje explicando qué no alcanza a cubrirse (el LLM decide qué recortar/sugerir mover),
-  en vez de fallar la llamada.
+- La fase "Preparación previa (día anterior)" solo aparece si hay esperas largas
+  (remojar legumbres, marinar > 1h, descongelar, fermentar); no cuenta en el tiempo de la
+  sesión.
+- `estimated_total_minutes` **no** es el que inventa el LLM: el backend lo recalcula desde
+  las tareas como `max(suma de tareas activas, tarea pasiva más larga)`, asumiendo que la
+  cocción pasiva corre en paralelo con el trabajo activo.
+- Si ese total supera `available_minutes`, el backend pone en `warning` un mensaje
+  ("El plan toma ~X min y tienes Y...") en vez de fallar la llamada; si alcanza,
+  `warning` es `null`.
 - `completed` (bool) **no** viene del backend — es estado puramente client-side que se
   añade a cada tarea al guardar en `idb-keyval`.
 
@@ -168,6 +175,24 @@ Notas:
      completitud al prompt: cada `recipe_id` de la sesión debe quedar representado en
      al menos una tarea, y cada ingrediente que necesite corte/pelado/picado debe
      nombrarse explícitamente (no resumirse con frases genéricas).
+- **Batch-cooking y tiempos realistas (fix 2026-09-27)**: el plan salía con tareas
+  demasiado básicas (una por receta) y tiempos ilógicos (el LLM decía 115 min cuando sus
+  tareas sumaban 235). Cambios:
+  - El prompt agrupa tareas por técnica ("Picar cebolla (para recetas X, Y, Z)"), arranca
+    primero lo de horno/olla a presión y hace lo activo mientras espera, nunca dice
+    "servir" (termina en enfriar, porcionar y guardar etiquetado en nevera/congelador),
+    deja para el día de consumo lo que pierde calidad hecho antes (bebidas calientes,
+    huevos pochados, tostadas, crocantes) y respeta los tiempos de las instrucciones
+    originales.
+  - `MealPrepPlanner._recompute_timing` recalcula el total y el `warning` (ver sección 5).
+- **Bebidas fuera del mealprep (2026-09-27)**: bebidas como chocolate caliente, té, café,
+  jugos, electrolitos o mocktails no tienen sentido en una sesión de mealprep; se manejan
+  desde el Cookbook. Mismo patrón que los condimentos:
+  - `backfill_drink_tags.py` retagueó las bebidas existentes a `bebida, otros` (sin tag de
+    tipo de comida) y se reindexó Chroma con `populate_db.py`.
+  - `langchain_pipeline.py` instruye al LLM de ingesta a etiquetar así las bebidas nuevas.
+  - `rag_planner.py`: el último fallback (sin restricciones) excluye recetas con tags
+    `otros` o `condimento`, para que no se cuelen en casos borde.
 
 ## 7. Frontend
 

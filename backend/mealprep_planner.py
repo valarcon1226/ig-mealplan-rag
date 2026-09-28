@@ -68,10 +68,31 @@ similares entre recetas (ej. cortar todos los vegetales juntos, aprovechar el ho
 para varias recetas a la vez) para minimizar el tiempo total en cocina.
 
 Para cada sesión debes devolver fases, en este orden fijo cuando aplique:
+0. "Preparación previa (día anterior)" -- SOLO pasos con esperas largas que no
+   caben en la sesión: remojar legumbres toda la noche, marinar más de 1 hora,
+   descongelar, fermentar. No los metas en otras fases como si tomaran minutos.
 1. "Corte y preparación"
 2. "Cocción activa" (estufa, sartén, algo que requiere atención constante)
-3. "Cocción pasiva" (horno, olla, algo que se deja cocinando solo)
+3. "Cocción pasiva" (horno, olla, olla a presión, algo que se deja cocinando solo)
 4. "Ensamblaje y almacenamiento"
+
+REGLAS DE BATCH-COOKING (esto es lo que hace útil el plan):
+- Agrupa por TÉCNICA, no por receta: una sola tarea "Picar cebolla (para
+  recetas X, Y, Z)" en vez de una tarea de corte por cada receta. Lo mismo al
+  cocinar: si dos recetas usan sartén con cebolla sofrita, hazlo junto.
+- Ordena para aprovechar esperas: lo que va al horno u olla a presión se
+  arranca PRIMERO, y mientras se cocina se hacen las tareas activas. Indícalo
+  en el texto ("mientras el horno trabaja, ...").
+- Un meal prep NO sirve comida: nunca escribas "servir". En "Ensamblaje y
+  almacenamiento" indica enfriar, porcionar y guardar en recipientes
+  etiquetados con el día y comida, y si va a nevera o congelador.
+- Lo que pierde calidad hecho con anticipación (bebidas calientes, café,
+  huevos pochados, tostadas, cosas crocantes): en la sesión deja solo lo
+  adelantable (medir secos, porcionar, preparar bases) y agrega una tarea en
+  "Ensamblaje y almacenamiento" que diga qué terminar el día de consumo.
+- estimated_minutes debe ser realista y respetar los tiempos de las
+  instrucciones originales (si dice "hornear 40 minutos", son 40). No
+  inventes tiempos cortos para que el plan quepa.
 
 REGLA CRÍTICA DE COMPLETITUD (no la incumplas para acortar el plan):
 - CADA receta de la sesión debe quedar representada en al menos una tarea de
@@ -150,4 +171,38 @@ NO agregues texto antes ni después del JSON. Sólo devuelve el JSON.
                 f"No se pudo parsear el plan de mealprep. Respuesta raw: {text_resp}"
             )
 
-        return json.loads(match.group(0))
+        result = json.loads(match.group(0))
+        available = {s.get("session_id"): s.get("available_minutes") for s in sessions}
+        for s in result.get("sessions", []):
+            self._recompute_timing(s, available.get(s.get("session_id")))
+        return result
+
+    @staticmethod
+    def _recompute_timing(session: Dict[str, Any], available_minutes) -> None:
+        """
+        El LLM inventa estimated_total_minutes (ej. decía 115 cuando sus tareas
+        sumaban 235), así que se recalcula desde las tareas y se genera el
+        warning aquí si no alcanza el tiempo.
+        """
+        hands_on = 0
+        longest_passive = 0
+        for phase in session.get("phases", []):
+            name = phase.get("phase_name", "").lower()
+            minutes = [int(t.get("estimated_minutes") or 0) for t in phase.get("tasks", [])]
+            if "previa" in name:
+                continue  # se hace el día anterior, no cuenta en la sesión
+            if "pasiva" in name:
+                longest_passive = max([longest_passive, *minutes])
+            else:
+                hands_on += sum(minutes)
+        # ponytail: asume que la cocción pasiva corre en paralelo con el trabajo
+        # activo; si el LLM no la solapa bien, el total real será mayor.
+        total = max(hands_on, longest_passive)
+        session["estimated_total_minutes"] = total
+        if available_minutes and total > int(available_minutes):
+            session["warning"] = session.get("warning") or (
+                f"El plan toma ~{total} min y tienes {available_minutes}. "
+                "Mueve alguna receta a otra sesión o agrega tiempo."
+            )
+        elif available_minutes:
+            session["warning"] = None

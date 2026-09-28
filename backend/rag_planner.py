@@ -114,7 +114,11 @@ class RAGMealPlanner:
                 
             # Si a pesar de relajar calorias sigue sin haber por las restricciones, usamos los mas relevantes sin restriccion estricta
             if not valid_results:
-                valid_results = [r for r in results if r.get("ingredientes")][:n_results]
+                valid_results = [
+                    r for r in results
+                    if r.get("ingredientes")
+                    and not {"otros", "condimento"} & {t.strip().lower() for t in (r.get("tags") or "").split(",")}
+                ][:n_results]
                 
             all_candidates_context += f"\n--- Candidatos para {slot_key.upper()} (tipo: {meal_type}, Objetivo: ~{int(meal_cals)} kcal) ---\n"
             for r in valid_results:

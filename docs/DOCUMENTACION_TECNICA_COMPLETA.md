@@ -366,13 +366,15 @@ Generador **100% determinístico** de listas de compras:
 
 **Clase:** `MealPrepPlanner` — convierte el plan activo en sesiones de batch-cooking.
 
-- Recibe las recetas agrupadas por sesión (stateless, sin acceso a la DB) y hace una sola
-  llamada LLM que devuelve fases: preparación previa (día anterior, opcional), corte y
-  preparación, cocción activa, cocción pasiva, ensamblaje y almacenamiento.
-- El prompt agrupa tareas por técnica entre recetas, arranca primero horno/olla y exige
-  que cada receta e ingrediente a cortar aparezca en alguna tarea.
-- `_recompute_timing()` recalcula `estimated_total_minutes` desde las tareas
-  (`max(activo, pasiva más larga)`) y genera el `warning` si no alcanza el tiempo.
+- Recibe las recetas agrupadas por sesión (stateless, sin acceso a la DB) y las pasa al
+  LLM como JSON compacto: recetas deduplicadas con ref corta y porciones, ingredientes
+  sumados con las recetas que los usan.
+- Una sola llamada con `with_structured_output` (Pydantic): tareas con fase ∈ previa,
+  corte, activa, pasiva, almacenamiento. El prompt agrupa por técnica entre recetas y
+  arranca primero horno/olla.
+- `_to_response()` arma fases en orden fijo e ids, recalcula `estimated_total_minutes`
+  (`max(activo, pasiva más larga)`) y genera el `warning` si no alcanza el tiempo o si
+  alguna receta quedó fuera.
 - Las bebidas (`bebida, otros`) y condimentos no entran al plan ni, por ende, al mealprep.
 
 Detalle completo: [documentacion/mealprep-batch-planning.md](documentacion/mealprep-batch-planning.md).

@@ -139,9 +139,17 @@ Notas:
 - `estimated_total_minutes` **no** es el que inventa el LLM: el backend lo recalcula desde
   las tareas como `max(suma de tareas activas, tarea pasiva más larga)`, asumiendo que la
   cocción pasiva corre en paralelo con el trabajo activo.
-- Si ese total supera `available_minutes`, el backend pone en `warning` un mensaje
-  ("El plan toma ~X min y tienes Y...") en vez de fallar la llamada; si alcanza,
-  `warning` es `null`.
+- Esperar en nevera (refrigerar, cuajar, congelar) no cuenta: va en almacenamiento con
+  2 min. El LLM lo sabe por el prompt y el backend lo corrige si igual lo pone en "pasiva".
+- `warning` lo arma el backend (nunca el LLM), en vez de fallar la llamada:
+  - Si el total supera `available_minutes`: "El mealprep de estos días toma ~3 h 23 min y
+    tienes 2 h 30 min. Puedes hacerlo todo en una sesión de 3 h 23 min o partirlo en una
+    sesión de 2 h 30 min y otra de ~53 min." La primera sesión es el tiempo que dio el
+    usuario y la segunda, la diferencia.
+  - Si alguna receta no quedó en ninguna tarea: "El plan no incluyó: <nombres>".
+  - Si todo está bien, `null`.
+- Los `id` de tarea (`s{sesión}-p{fase}-t{n}`) y los `phase_name` también los pone el
+  backend; las fases vacías no se devuelven.
 - `completed` (bool) **no** viene del backend — es estado puramente client-side que se
   añade a cada tarea al guardar en `idb-keyval`.
 
@@ -149,18 +157,24 @@ Notas:
 
 - Nuevo módulo `backend/mealprep_planner.py`, clase `MealPrepPlanner` — mismo patrón que
   `RAGMealPlanner` en `rag_planner.py`:
-  - Arma contexto determinístico por sesión: ingredientes deduplicados/normalizados
-    (reusa `ingredient_normalizer.parse_amount_str`) + instrucciones crudas de cada
-    receta.
-  - Una sola llamada LLM por request (`get_llm()`, mismo prompt + parseo de JSON con
-    regex que ya usa `rag_planner.py`).
+  - Arma un JSON compacto por sesión (`_session_input`): cada receta aparece **una vez**
+    con una ref corta (`r1`, `r2`...), sus `porciones` y `para` (días/comidas que cubre)
+    y sus pasos originales; los ingredientes van normalizados y sumados por
+    (nombre, unidad), cada uno con las refs de las recetas que lo usan — así el LLM agrupa
+    por técnica sin adivinar qué ingrediente es de qué receta.
+  - Una sola llamada LLM por request con `with_structured_output(LLMPlan)` (esquema
+    Pydantic: por sesión, una lista plana de tareas con `fase` ∈ {previa, corte, activa,
+    pasiva, almacenamiento}, `texto`, `minutos`, `recetas`). Temperatura 0.2: con 0.7
+    comprimía todo en pocas tareas enormes.
+  - `_to_response` traduce al contrato de la sección 5: refs → `recipe_id` reales, fases
+    en orden fijo, ids, total de tiempo y warnings.
   - Sin acceso a la DB — recibe todo lo que necesita en el request.
 - Nuevo endpoint `POST /api/mealprep/generate` en `ig_recetas.py`, junto a
   `/api/mealplan/generate`.
 - Nuevo passthrough explícito en `frontend/server.ts` (el proxy genérico rompe el
   prefijo `/api`, como ya pasó con `/api/pantry` — mismo fix, mismo patrón).
-- Manejo de errores: si el LLM no devuelve JSON parseable, `ValueError` →
-  `HTTPException(400)`, igual que `generate_mealplan`.
+- Manejo de errores: si el LLM no está configurado o no devuelve un plan válido,
+  `ValueError` → `HTTPException(400)`, igual que `generate_mealplan`.
 - **Completitud (fix 2026-09-25)**: se detectó que el plan de mealprep podía "perder"
   recetas e ingredientes en el camino, por dos causas distintas:
   1. `rag_planner.py` podía seleccionar recetas sin datos reales (posts de IG donde solo
@@ -184,7 +198,20 @@ Notas:
     deja para el día de consumo lo que pierde calidad hecho antes (bebidas calientes,
     huevos pochados, tostadas, crocantes) y respeta los tiempos de las instrucciones
     originales.
-  - `MealPrepPlanner._recompute_timing` recalcula el total y el `warning` (ver sección 5).
+  - El backend recalcula el total y el `warning` (ver sección 5).
+- **Input JSON y salida estructurada (2026-09-28)**: el prompt pasó de ~80 líneas de prosa
+  + contexto en texto a un system prompt corto con reglas numeradas y el input en JSON
+  (ver arriba). Además corrigió que un ingrediente con dos unidades distintas pisaba la
+  cantidad anterior, y que una receta repetida en la sesión se le mostraba al LLM dos
+  veces (ahora es una receta con `porciones: 2`).
+- **Clasificación estricta de tareas (2026-09-28)**: el LLM ponía "hornear el pollo 35 min"
+  como cocción activa, juntaba "mezclar la masa y cocinar en la wafflera" en una tarea y
+  contaba "refrigerar gomitas 3 h" como cocción pasiva, lo que inflaba el total. El prompt
+  ahora tiene una tabla fase → criterio → ejemplos → minutos guía (ej. 1-2 min por
+  verdura chica, tiempo de cocción x tandas, 2 min por recipiente) y reglas explícitas:
+  una tarea = una fila de la tabla, horno/air fryer siempre pasiva, nevera nunca pasiva.
+  Se decidió quedarse con Gemini Flash-Lite: se probó `qwen3:4b` en el homelab (262 s por
+  5 recetas y se saltaba pasos), y un modelo más grande queda para después si hace falta.
 - **Bebidas fuera del mealprep (2026-09-27)**: bebidas como chocolate caliente, té, café,
   jugos, electrolitos o mocktails no tienen sentido en una sesión de mealprep; se manejan
   desde el Cookbook. Mismo patrón que los condimentos:

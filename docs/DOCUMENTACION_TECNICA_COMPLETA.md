@@ -307,7 +307,8 @@ Genera planes nutricionales personalizados combinando búsqueda vectorial + LLM:
 3. **Relajación progresiva** — Si hay pocos candidatos, amplía los límites
 4. **Prompt dinámico al LLM** — Instrucciones estrictas de variedad, prohibición de suplementos, y respeto a restricciones
 5. **Rehidratación desde SQLite** — Mapea ingredientes e instrucciones completas
-6. **Scoring** — `score = diff_cals + diff_prot * 10` (menor es mejor)
+6. **Reajuste calórico por día (`_rebalance_day`)** — El LLM no suma bien (un día podía quedar en 2213 kcal con la meta más abajo). La meta diaria es un **techo**: mientras el día se pase (o quede más de 10% por debajo, `CAL_MARGIN`), se toma la comida que más se desvía hacia ese lado, se buscan más recetas de ese tipo en ChromaDB dentro de su rango normal (`[70%, 130%]` de su objetivo), se arman 3 opciones que dejen el día sin pasarse de la meta y se elige la de más proteína. Si no alcanza, sigue con otra comida; si con porciones normales no baja, permite comidas de hasta 30% de su objetivo. Tope de `4 × comidas` búsquedas por día.
+7. **Scoring** — `score = diff_cals + diff_prot * 10` (menor es mejor)
 
 ---
 

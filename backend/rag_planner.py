@@ -7,12 +7,136 @@ from vector_db import get_chroma_client, get_or_create_collection, perform_filte
 from rag_chatbot import get_llm
 from langchain_core.messages import SystemMessage, HumanMessage
 
+# Desvío máximo de calorías de un día contra la meta antes de reajustarlo.
+CAL_MARGIN = 0.10
+
+
 class RAGMealPlanner:
     def __init__(self, db: Session):
         self.db = db
         self.chroma_client = get_chroma_client()
         self.collection = get_or_create_collection(self.chroma_client)
         self.llm = get_llm()
+
+    @staticmethod
+    def _valid(results: List[Dict[str, Any]], meal_type: str, restrictions: List[str], exclude=()) -> List[Dict[str, Any]]:
+        """Candidatos con receta real, del tipo de comida y que cumplen las restricciones."""
+        valid = []
+        for res in results:
+            # Recetas sin ingredientes son posts de IG donde no se guardó la receta
+            # completa -- no hay nada que cocinar.
+            if not res.get("ingredientes") or res.get("id") in exclude:
+                continue
+            tags = [t.strip().lower() for t in (res.get("tags") or "").split(",")]
+            if meal_type.lower() not in tags:
+                continue
+            if any(rest.lower() not in tags for rest in restrictions or []):
+                continue
+            valid.append(res)
+        return valid
+
+    @staticmethod
+    def _build_meal(recipe: Recipe, m_type: str) -> Dict[str, Any]:
+        ing_raw = []
+        if recipe.ingredients_raw:
+            try:
+                ing_raw = json.loads(recipe.ingredients_raw)
+            except:
+                pass
+
+        ing_mapped = []
+        for ing in ing_raw:
+            if isinstance(ing, dict):
+                name = ing.get("nombre") or ing.get("ingrediente") or ing.get("item") or "Ingrediente"
+                cantidad = str(ing.get("cantidad", "")) if ing.get("cantidad") is not None else ""
+                unidad = str(ing.get("unidad", "")) if ing.get("unidad") is not None else ""
+                ing_mapped.append({"name": name, "amount": f"{cantidad} {unidad}".strip()})
+            else:
+                ing_mapped.append({"name": str(ing), "amount": ""})
+
+        instructions = []
+        if recipe.instructions:
+            try:
+                instructions = json.loads(recipe.instructions)
+            except:
+                pass
+
+        n = recipe.nutrition
+        return {
+            "meal_type": m_type,
+            "recipe_id": recipe.id,
+            "media_id": recipe.media_id,
+            "nombre": recipe.nombre,
+            "calorias": n.calories if n else 0,
+            "proteinas": n.proteins if n else 0,
+            "carbohidratos": n.carbohydrates if n else 0,
+            "grasas": n.fats if n else 0,
+            "thumbnail_url": recipe.thumbnail_url,
+            "video_url": recipe.video_url,
+            "ingredients": ing_mapped,
+            "instructions": instructions,
+        }
+
+    def _rebalance_day(self, meals: List[Dict[str, Any]], meal_targets: List[float], target_cals: float, restrictions: List[str]) -> None:
+        """
+        El LLM no suma bien: con 3 candidatos por comida, un día podía quedar en
+        2213 kcal con meta de 1400. La meta es un techo: mientras el día se pase
+        (o quede más de CAL_MARGIN por debajo), se toma la comida que más se desvía
+        hacia ese lado, se buscan más recetas de ese tipo, se arman 3 opciones que
+        dejen el día sin pasarse y se elige la de más proteína.
+        """
+        floor = 0.7  # el reemplazo se queda en el rango normal de su comida (±30%)
+        tried = set()
+        for _ in range(4 * len(meals)):  # tope de búsquedas por día
+            total = sum(m["calorias"] for m in meals)
+            over = total > target_cals
+            if not over and total >= target_cals * (1 - CAL_MARGIN):
+                return
+            if len(tried) == len(meals):
+                # Si con porciones normales no baja de la meta, se permiten comidas
+                # más livianas (hasta 30% de su objetivo) antes de rendirse.
+                if over and floor > 0.3:
+                    floor, tried = 0.3, set()
+                    continue
+                return
+
+            sign = 1 if over else -1
+            i = max(
+                (j for j in range(len(meals)) if j not in tried),
+                key=lambda j: (meals[j]["calorias"] - meal_targets[j]) * sign,
+            )
+            tried.add(i)
+            m_type = meals[i]["meal_type"]
+            cur = meals[i]["calorias"]
+            # Máximo de calorías que puede tener el reemplazo sin que el día se pase.
+            limit = cur - (total - target_cals)
+
+            results = perform_filtered_search(
+                self.collection,
+                query=f"recetas de {m_type}",
+                min_calories=meal_targets[i] * floor,
+                max_calories=meal_targets[i] * 1.3,
+                n_results=100,
+            )
+            options = self._valid(results, m_type, restrictions, exclude={m["media_id"] for m in meals})
+            cal = lambda r: r.get("calorias") or 0
+            if over:
+                # Las que dejan el día bajo la meta, empezando por las más cercanas a
+                # ella; si ninguna alcanza, las que más bajan (y sigue con otra comida).
+                fits = sorted((r for r in options if cal(r) <= limit), key=cal, reverse=True)
+                fits = fits or sorted((r for r in options if cal(r) < cur), key=cal)
+            else:
+                fits = sorted((r for r in options if cur < cal(r) <= limit), key=cal, reverse=True)
+
+            top3 = fits[:3]
+            if not top3:
+                continue
+            best = max(top3, key=lambda r: r.get("proteina") or 0)
+            recipe = self.db.query(Recipe).filter(Recipe.media_id == best["id"]).first()
+            if not recipe or not recipe.nutrition:
+                continue
+            meals[i] = self._build_meal(recipe, m_type)
+            tried.discard(i)  # la nueva receta puede volver a ajustarse si hace falta
 
     def generate(self, meal_structure: List[str], target_macros: Dict[str, float], restrictions: List[str], cycle_phase: str, num_days: int = 1) -> Any:
         is_multi_day = num_days > 1
@@ -65,28 +189,8 @@ class RAGMealPlanner:
             )
             
             # Filtrar estrictamente por tag y restricciones en python
-            valid_results = []
-            for res in results:
-                if not res.get("ingredientes"):
-                    # Recetas sin ingredientes son posts de IG donde no se
-                    # guardo la receta completa -- no hay nada que cocinar.
-                    continue
-                tags = [t.strip().lower() for t in res.get("tags", "").split(",")]
-                if meal_type.lower() not in tags:
-                    continue
-                if restrictions:
-                    fails_restriction = False
-                    for rest in restrictions:
-                        if rest.lower() not in tags:
-                            fails_restriction = True
-                            break
-                    if fails_restriction:
-                        continue
-                
-                valid_results.append(res)
-                if len(valid_results) >= n_results:
-                    break
-            
+            valid_results = self._valid(results, meal_type, restrictions)[:n_results]
+
             # Si somos muy estrictos y no hay, relajamos calorias
             if not valid_results:
                 results = perform_filtered_search(
@@ -94,24 +198,8 @@ class RAGMealPlanner:
                     query=f"recetas de {meal_type}",
                     n_results=100
                 )
-                for res in results:
-                    if not res.get("ingredientes"):
-                        continue
-                    tags = [t.strip().lower() for t in res.get("tags", "").split(",")]
-                    if meal_type.lower() not in tags:
-                        continue
-                    if restrictions:
-                        fails_restriction = False
-                        for rest in restrictions:
-                            if rest.lower() not in tags:
-                                fails_restriction = True
-                                break
-                        if fails_restriction:
-                            continue
-                    valid_results.append(res)
-                    if len(valid_results) >= n_results:
-                        break
-                
+                valid_results = self._valid(results, meal_type, restrictions)[:n_results]
+
             # Si a pesar de relajar calorias sigue sin haber por las restricciones, usamos los mas relevantes sin restriccion estricta
             if not valid_results:
                 valid_results = [
@@ -214,64 +302,24 @@ CANDIDATOS DISPONIBLES:
         result_days = []
         for day_obj in days:
             meals_result = []
-            total_cals = 0
-            total_prot = 0
-            total_carbs = 0
-            total_fats = 0
-            
+            meal_targets = []
             for slot_key, m_type in slots:
                 media_id = day_obj.get(slot_key)
                 if not media_id:
                     continue
-                
                 recipe = self.db.query(Recipe).filter(Recipe.media_id == media_id).first()
                 if not recipe:
                     continue
-                    
-                ing_raw = []
-                if recipe.ingredients_raw:
-                    try:
-                        ing_raw = json.loads(recipe.ingredients_raw)
-                    except:
-                        pass
-                        
-                ing_mapped = []
-                for ing in ing_raw:
-                    if isinstance(ing, dict):
-                        name = ing.get("nombre") or ing.get("ingrediente") or ing.get("item") or "Ingrediente"
-                        cantidad = str(ing.get("cantidad", "")) if ing.get("cantidad") is not None else ""
-                        unidad = str(ing.get("unidad", "")) if ing.get("unidad") is not None else ""
-                        ing_mapped.append({"name": name, "amount": f"{cantidad} {unidad}".strip()})
-                    else:
-                        ing_mapped.append({"name": str(ing), "amount": ""})
-                        
-                instructions = []
-                if recipe.instructions:
-                    try:
-                        instructions = json.loads(recipe.instructions)
-                    except:
-                        pass
+                meals_result.append(self._build_meal(recipe, m_type))
+                meal_targets.append(total_target_cals * percentages[slot_key])
 
-                meals_result.append({
-                    "meal_type": m_type,
-                    "recipe_id": recipe.id,
-                    "nombre": recipe.nombre,
-                    "calorias": recipe.nutrition.calories if recipe.nutrition else 0,
-                    "proteinas": recipe.nutrition.proteins if recipe.nutrition else 0,
-                    "carbohidratos": recipe.nutrition.carbohydrates if recipe.nutrition else 0,
-                    "grasas": recipe.nutrition.fats if recipe.nutrition else 0,
-                    "thumbnail_url": recipe.thumbnail_url,
-                    "video_url": recipe.video_url,
-                    "ingredients": ing_mapped,
-                    "instructions": instructions
-                })
-                
-                if recipe.nutrition:
-                    total_cals += recipe.nutrition.calories
-                    total_prot += recipe.nutrition.proteins
-                    total_carbs += recipe.nutrition.carbohydrates
-                    total_fats += recipe.nutrition.fats
-                    
+            self._rebalance_day(meals_result, meal_targets, total_target_cals, restrictions)
+
+            total_cals = sum(m["calorias"] for m in meals_result)
+            total_prot = sum(m["proteinas"] for m in meals_result)
+            total_carbs = sum(m["carbohidratos"] for m in meals_result)
+            total_fats = sum(m["grasas"] for m in meals_result)
+
             diff_cals = abs(total_cals - target_macros.get("calorias", 0))
             diff_prot = abs(total_prot - target_macros.get("proteinas", 0)) * 10
             score = diff_cals + diff_prot

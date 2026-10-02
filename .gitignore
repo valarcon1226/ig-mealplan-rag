@@ -32,3 +32,10 @@ backend/mock_plan_output.json
 backend/mock_search.py
 backend/meal_plan_7_days.md
 backend/generate_markdown.py
+
+# Servings/nutrition audit report (regenerated)
+backend/servings_audit.csv
+
+# Local data backups made by backfill/migration scripts
+*.bak-*
+frontend_dev.log

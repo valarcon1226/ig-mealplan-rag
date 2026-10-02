@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { get, set } from 'idb-keyval';
-import { Recipe, UserProfile } from './types';
-import { format } from 'date-fns';
+import { EatEntry, Macros, Recipe, UserProfile } from './types';
+import { format, subDays } from 'date-fns';
 
 type StoreContextType = {
   recipes: Recipe[];
@@ -9,6 +9,11 @@ type StoreContextType = {
   addRecipe: (recipe: Recipe) => void;
   deleteRecipe: (id: string) => void;
   updateRecipe: (id: string, updates: Partial<Recipe>) => void;
+  markEaten: (id: string) => void;
+  eatLog: EatEntry[];
+  logMeal: (entry: Omit<EatEntry, 'id' | 'date' | 'at'>) => void;
+  unlogMeal: (id: string) => void;
+  streakDays: number;
   profile: UserProfile;
   updateProfile: (updates: Partial<UserProfile>) => void;
   dailyConsumption: { date: string; macros: typeof defaultProfile.dailyGoals; caloriesBurned: number };
@@ -29,6 +34,41 @@ const defaultProfile: UserProfile = {
   menstrualCyclePhase: 'none',
 };
 
+// Recipes saved by older versions may lack fields the UI now relies on.
+const normalizeRecipes = (list: any[]): Recipe[] => list.map(r => ({
+  ...r,
+  title: r.title ?? '',
+  ingredients: r.ingredients ?? [],
+  instructions: r.instructions ?? [],
+  categories: r.categories ?? [],
+  macros: { calories: 0, protein: 0, carbs: 0, fat: 0, ...r.macros },
+}));
+
+const today = () => format(new Date(), 'yyyy-MM-dd');
+const ZERO_MACROS: Macros = { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sugar: 0 };
+
+export const sumMacros = (entries: EatEntry[]): Macros =>
+  entries.reduce((acc, e) => {
+    const m = e.macros;
+    if (!m) return acc;
+    return {
+      calories: acc.calories + (m.calories ?? 0), protein: acc.protein + (m.protein ?? 0),
+      carbs: acc.carbs + (m.carbs ?? 0), fat: acc.fat + (m.fat ?? 0),
+      fiber: acc.fiber + (m.fiber ?? 0), sugar: acc.sugar + (m.sugar ?? 0),
+    };
+  }, ZERO_MACROS);
+
+// Consecutive days with at least one eaten meal. Today counts once something is
+// logged; until then the streak runs through yesterday so it doesn't reset in the morning.
+function computeStreak(log: EatEntry[]): number {
+  const days = new Set(log.map(e => e.date));
+  let d = new Date();
+  if (!days.has(format(d, 'yyyy-MM-dd'))) d = subDays(d, 1);
+  let n = 0;
+  while (days.has(format(d, 'yyyy-MM-dd'))) { n++; d = subDays(d, 1); }
+  return n;
+}
+
 const StoreContext = createContext<StoreContextType | null>(null);
 
 export const StoreProvider = ({ children }: { children: ReactNode }) => {
@@ -39,6 +79,7 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     macros: { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sugar: 0 },
     caloriesBurned: 0 
   });
+  const [eatLog, setEatLog] = useState<EatEntry[]>([]);
   const [folderPosts, setFolderPosts] = useState<any[]>([]);
   const [currentMealPlan, setCurrentMealPlanState] = useState<any | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -72,7 +113,7 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
           setProfile(loadedProfile);
           set('app_profile', loadedProfile);
           
-          setRecipes(data.data.recipes || []);
+          setRecipes(normalizeRecipes(data.data.recipes || []));
           set('app_recipes', data.data.recipes || []);
         }
       }
@@ -89,32 +130,16 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     const loadData = async () => {
       const storedRecipes = await get('app_recipes');
-      if (storedRecipes) setRecipes(storedRecipes);
+      if (storedRecipes) setRecipes(normalizeRecipes(storedRecipes));
 
       const storedProfile = await get('app_profile');
-      if (storedProfile) {
-        const today = format(new Date(), 'yyyy-MM-dd');
-        let newStreak = storedProfile.streakDays;
-        
-        if (storedProfile.lastActiveDate) {
-          const lastDate = new Date(storedProfile.lastActiveDate);
-          const diffDiff = Math.floor((new Date().getTime() - lastDate.getTime()) / (1000 * 3600 * 24));
-          if (diffDiff === 1) {
-            newStreak += 1;
-          } else if (diffDiff > 1) {
-            newStreak = 0;
-          }
-        } else {
-          newStreak = 1;
-        }
+      if (storedProfile) setProfile(storedProfile);
 
-        const updatedProfile = { ...storedProfile, streakDays: newStreak, lastActiveDate: today };
-        setProfile(updatedProfile);
-        set('app_profile', updatedProfile);
-      }
+      const storedLog = await get('app_eat_log');
+      if (storedLog) setEatLog(storedLog);
 
       const storedDaily = await get('app_daily');
-      if (storedDaily && storedDaily.date === format(new Date(), 'yyyy-MM-dd')) {
+      if (storedDaily && storedDaily.date === today()) {
         setDailyConsumption(storedDaily);
       }
       
@@ -149,11 +174,40 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     triggerSync(profile, newRecipes);
   };
 
-  const updateRecipe = (id: string, updates: Partial<Recipe>) => {
-    const newRecipes = recipes.map(r => r.id === id ? { ...r, ...updates } : r);
-    setRecipes(newRecipes);
-    set('app_recipes', newRecipes);
-    triggerSync(profile, newRecipes);
+  // Functional form so several updates in one handler (e.g. replace = unlog + log) don't overwrite each other.
+  const updateRecipeWith = (id: string, fn: (r: Recipe) => Partial<Recipe>) => {
+    setRecipes(prev => {
+      const newRecipes = prev.map(r => r.id === id ? { ...r, ...fn(r) } : r);
+      set('app_recipes', newRecipes);
+      triggerSync(profile, newRecipes);
+      return newRecipes;
+    });
+  };
+
+  const updateRecipe = (id: string, updates: Partial<Recipe>) => updateRecipeWith(id, () => updates);
+
+  // Count a serving eaten (Cookbook or Planner) for the "Most eaten" tab.
+  const markEaten = (id: string) =>
+    updateRecipeWith(id, r => ({ timesEaten: (r.timesEaten ?? 0) + 1, lastEatenAt: Date.now() }));
+
+  const saveLog = (fn: (log: EatEntry[]) => EatEntry[]) =>
+    setEatLog(prev => {
+      const next = fn(prev);
+      set('app_eat_log', next);
+      return next;
+    });
+
+  // Every eaten serving (Planner check, replacement, Cookbook "Add 1 Serving") goes through here.
+  const logMeal = (entry: Omit<EatEntry, 'id' | 'date' | 'at'>) => {
+    saveLog(log => [...log, { ...entry, id: crypto.randomUUID(), date: today(), at: Date.now() }]);
+    if (entry.recipeId) markEaten(entry.recipeId);
+  };
+
+  const unlogMeal = (id: string) => {
+    const entry = eatLog.find(e => e.id === id);
+    if (!entry) return;
+    saveLog(log => log.filter(e => e.id !== id));
+    if (entry.recipeId) updateRecipeWith(entry.recipeId, r => ({ timesEaten: Math.max(0, (r.timesEaten ?? 1) - 1) }));
   };
 
   const updateProfile = (updates: Partial<UserProfile>) => {
@@ -169,8 +223,12 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     set('app_daily', newDaily);
   };
 
+  // Today's macros are derived from the log, so un-checking a meal subtracts it.
+  const todaysConsumption = { ...dailyConsumption, macros: sumMacros(eatLog.filter(e => e.date === today())) };
+  const streakDays = computeStreak(eatLog);
+
   return (
-    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, profile, updateProfile, dailyConsumption, updateDailyConsumption, folderPosts, setFolderPosts, isLoading, loadFromCloud, syncToCloud, currentMealPlan, setCurrentMealPlan }}>
+    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, markEaten, eatLog, logMeal, unlogMeal, streakDays, profile, updateProfile, dailyConsumption: todaysConsumption, updateDailyConsumption, folderPosts, setFolderPosts, isLoading, loadFromCloud, syncToCloud, currentMealPlan, setCurrentMealPlan }}>
       {children}
     </StoreContext.Provider>
   );

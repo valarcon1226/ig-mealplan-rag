@@ -10,12 +10,26 @@ dotenv.config();
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const upload = multer({ dest: '/tmp/' });
+// ig-scrapp FastAPI backend. Not 8001: that port is taken by another local project's Docker API.
+const BACKEND_URL = process.env.BACKEND_URL || "http://127.0.0.1:8011";
 
 async function startServer() {
   const app = express();
   const PORT = 4000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: '15mb' })); // receipt photos arrive as base64
+
+  // Recipe thumbnails are served by the backend; stored as relative /static/... URLs.
+  app.get('/static/*', async (req, res) => {
+    try {
+      const r = await fetch(`${BACKEND_URL}${req.path}`);
+      if (!r.ok) return res.sendStatus(r.status);
+      res.type(r.headers.get('content-type') || 'application/octet-stream');
+      res.send(Buffer.from(await r.arrayBuffer()));
+    } catch {
+      res.sendStatus(502);
+    }
+  });
 
   // --- Garmin Connect API Routes ---
 
@@ -81,7 +95,7 @@ async function startServer() {
 
   app.post("/api/ig/login", async (req, res) => {
     try {
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const { username, password } = req.body;
       const response = await fetch(`${vpsUrl}/login`, {
         method: "POST",
@@ -110,7 +124,7 @@ async function startServer() {
   app.post("/api/ig/collections", async (req, res) => {
     try {
       const { username, password } = req.body;
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const response = await fetch(`${vpsUrl}/collections`, {
         method: "GET",
         headers: {
@@ -134,7 +148,7 @@ async function startServer() {
   app.post("/api/ig/scrape-collection", async (req, res) => {
     try {
       const { folderId, username, password } = req.body;
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       
       const url = folderId 
           ? `${vpsUrl}/collection-posts/all?collection_id=${folderId}&since=0`
@@ -177,7 +191,7 @@ async function startServer() {
 
   app.get("/api/recipes", async (req, res) => {
     try {
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const response = await fetch(`${vpsUrl}/api/recipes`, {
         method: "GET",
         headers: {
@@ -195,9 +209,37 @@ async function startServer() {
     }
   });
 
+  app.post("/api/recipes/search", async (req, res) => {
+    try {
+      const vpsUrl = BACKEND_URL;
+      const response = await fetch(`${vpsUrl}/api/recipes/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        body: JSON.stringify(req.body)
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to search recipes: " + error.message });
+    }
+  });
+
+  app.post("/api/intake-score", async (req, res) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/intake-score`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        body: JSON.stringify(req.body)
+      });
+      res.status(response.status).json(await response.json());
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to score intake: " + error.message });
+    }
+  });
+
   app.post("/api/mealplan/generate", async (req, res) => {
     try {
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const response = await fetch(`${vpsUrl}/api/mealplan/generate`, {
         method: "POST",
         headers: {
@@ -206,11 +248,9 @@ async function startServer() {
         },
         body: JSON.stringify(req.body)
       });
-      if (!response.ok) {
-        throw new Error("Failed to reach FastAPI mealplan generator.");
-      }
+      // Pass the backend's status and message through (e.g. "no recipes fit your diet").
       const data = await response.json();
-      return res.json(data);
+      return res.status(response.status).json(data);
     } catch (error: any) {
       console.error("Mealplan Error:", error);
       res.status(500).json({ error: "Failed to generate plan: " + error.message });
@@ -219,7 +259,7 @@ async function startServer() {
 
   app.post("/api/mealprep/generate", async (req, res) => {
     try {
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const response = await fetch(`${vpsUrl}/api/mealprep/generate`, {
         method: "POST",
         headers: {
@@ -238,7 +278,7 @@ async function startServer() {
 
   app.post("/api/analyze-langchain-by-id", async (req, res) => {
     try {
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const bodyParams = { ...req.body };
       // Fallback for post_id logic just in case
       if (bodyParams.post_id && !bodyParams.media_id) {
@@ -371,7 +411,7 @@ async function startServer() {
 
   app.get("/api/pantry", async (req, res) => {
     try {
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const response = await fetch(`${vpsUrl}/api/pantry`, {
         headers: { "ngrok-skip-browser-warning": "true" }
       });
@@ -384,7 +424,7 @@ async function startServer() {
 
   app.post("/api/pantry", async (req, res) => {
     try {
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const response = await fetch(`${vpsUrl}/api/pantry`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
@@ -397,9 +437,39 @@ async function startServer() {
     }
   });
 
+  app.post("/api/pantry/remove", async (req, res) => {
+    try {
+      const vpsUrl = BACKEND_URL;
+      const response = await fetch(`${vpsUrl}/api/pantry/remove`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        body: JSON.stringify(req.body)
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to remove pantry item: " + error.message });
+    }
+  });
+
+  app.post("/api/pantry/receipt", async (req, res) => {
+    try {
+      const vpsUrl = BACKEND_URL;
+      const response = await fetch(`${vpsUrl}/api/pantry/receipt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        body: JSON.stringify(req.body)
+      });
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to scan receipt: " + error.message });
+    }
+  });
+
   app.delete("/api/pantry/:id", async (req, res) => {
     try {
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const response = await fetch(`${vpsUrl}/api/pantry/${req.params.id}`, {
         method: "DELETE",
         headers: { "ngrok-skip-browser-warning": "true" }
@@ -413,7 +483,7 @@ async function startServer() {
 
   app.post("/api/grocery/generate", async (req, res) => {
     try {
-      const vpsUrl = "http://127.0.0.1:8001";
+      const vpsUrl = BACKEND_URL;
       const response = await fetch(`${vpsUrl}/api/grocery/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
@@ -463,7 +533,6 @@ async function startServer() {
       return next(); // pass control to the next applicable route
     }
 
-    const BACKEND_URL = 'http://127.0.0.1:8001';
     const targetPath = req.path.replace('/api', '');
     const url = `${BACKEND_URL}${targetPath}${req.url.includes('?') ? '?' + req.url.split('?')[1] : ''}`;
 

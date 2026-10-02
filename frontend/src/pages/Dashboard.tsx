@@ -20,7 +20,7 @@ const getCyclePhase = (dateStr?: string) => {
 }
 
 export default function Dashboard() {
-  const { profile, dailyConsumption, updateDailyConsumption } = useStore();
+  const { profile, dailyConsumption, updateDailyConsumption, streakDays } = useStore();
   const [burnedInput, setBurnedInput] = useState('');
   const [isSyncingGarmin, setIsSyncingGarmin] = useState(false);
 
@@ -86,7 +86,7 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-2 bg-orange-500/10 text-orange-500 px-3 py-1.5 rounded-full">
           <Flame className="w-4 h-4" />
-          <span className="font-bold text-sm tracking-wide">{profile.streakDays} Day Streak</span>
+          <span className="font-bold text-sm tracking-wide">{streakDays} Day Streak</span>
         </div>
       </header>
 

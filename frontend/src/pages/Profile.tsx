@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../lib/store';
-import { Settings, RefreshCw, UserCircle, ActivitySquare, Link2, Calendar, HeartPulse } from 'lucide-react';
+import { Settings, RefreshCw, UserCircle, ActivitySquare, Link2, Calendar, HeartPulse, Leaf } from 'lucide-react';
+import { UserProfile } from '../lib/types';
+import { DIET_LABELS, splitList } from '../lib/diet';
 import { calculateMacros, getCyclePhase } from '../lib/macroCalculator';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
@@ -384,11 +386,13 @@ export default function Profile() {
 
         <div className="bg-neutral-950 p-4 rounded-xl border border-neutral-800 shadow-inner">
           <p className="text-xs text-neutral-500 uppercase tracking-wider mb-3 text-center">Calculated Daily Intake</p>
-          <div className="grid grid-cols-4 gap-2 text-center">
+          <div className="grid grid-cols-3 gap-x-2 gap-y-4 text-center">
              <div><div className="text-orange-500 font-bold text-xl">{profile.dailyGoals.calories}</div><div className="text-[10px] text-neutral-500 mt-1">KCAL</div></div>
              <div><div className="text-white font-bold text-xl">{profile.dailyGoals.protein}g</div><div className="text-[10px] text-neutral-500 mt-1">PRO</div></div>
              <div><div className="text-white font-bold text-xl">{profile.dailyGoals.carbs}g</div><div className="text-[10px] text-neutral-500 mt-1">CARB</div></div>
              <div><div className="text-white font-bold text-xl">{profile.dailyGoals.fat}g</div><div className="text-[10px] text-neutral-500 mt-1">FAT</div></div>
+             <div><div className="text-green-400 font-bold text-xl">{profile.dailyGoals.fiber}g</div><div className="text-[10px] text-neutral-500 mt-1">FIBRA (MÍN)</div></div>
+             <div><div className="text-pink-400 font-bold text-xl">{profile.dailyGoals.sugar}g</div><div className="text-[10px] text-neutral-500 mt-1">AZÚCAR (MÁX)</div></div>
           </div>
         </div>
       </section>
@@ -462,6 +466,8 @@ export default function Profile() {
           </div>
         </div>
       )}
+
+      <DietPreferences profile={profile} updateProfile={updateProfile} />
 
       {/* Cycle Sync & Pregnancy */}
       <section className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6">
@@ -669,6 +675,63 @@ export default function Profile() {
         </div>
       )}
     </div>
+  );
+}
+
+// Diet restrictions (hard filter) + foods to avoid (hard) + favorite foods (prioritized).
+// Used by the Cookbook filters and the meal planner.
+function DietPreferences({ profile, updateProfile }: { profile: UserProfile; updateProfile: (u: Partial<UserProfile>) => void }) {
+  const restrictions = profile.dietaryRestrictions ?? [];
+  const [avoid, setAvoid] = useState((profile.avoidFoods ?? []).join(', '));
+  const [likes, setLikes] = useState((profile.favoriteFoods ?? []).join(', '));
+
+  const toggle = (label: string) => updateProfile({
+    dietaryRestrictions: restrictions.includes(label) ? restrictions.filter(r => r !== label) : [...restrictions, label],
+  });
+
+  const inputClass = "w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:border-orange-500 outline-none transition-colors";
+
+  return (
+    <section className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 space-y-5">
+      <div>
+        <h2 className="font-bold text-lg flex items-center gap-2"><Leaf className="w-5 h-5 text-orange-500" /> Diet & Preferences</h2>
+        <p className="text-xs text-neutral-500 mt-1">Recipes and meal plans only show what fits you.</p>
+      </div>
+
+      <fieldset>
+        <legend className="text-xs text-neutral-500 uppercase tracking-wider mb-2">Dietary restrictions</legend>
+        <div className="flex flex-wrap gap-2">
+          {DIET_LABELS.map(label => {
+            const on = restrictions.includes(label);
+            return (
+              <button key={label} type="button" onClick={() => toggle(label)} aria-pressed={on}
+                className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-colors ${on ? 'bg-orange-500 border-orange-500 text-black' : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white'}`}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {restrictions.includes('Apto Diabético') && (
+          <p className="text-[11px] text-neutral-500 mt-2">Apto Diabético = máx. 10 g de azúcar por porción. Consulta tu plan con tu médico.</p>
+        )}
+      </fieldset>
+
+      <div className="space-y-1">
+        <label htmlFor="avoid-foods" className="text-xs text-neutral-500 uppercase tracking-wider">Don't eat / allergies</label>
+        <input id="avoid-foods" value={avoid} onChange={e => setAvoid(e.target.value)}
+          onBlur={() => updateProfile({ avoidFoods: splitList(avoid) })}
+          placeholder="e.g. cilantro, champiñones, atún" className={inputClass} />
+        <p className="text-[11px] text-neutral-600">Separated by commas. Recipes with these are hidden.</p>
+      </div>
+
+      <div className="space-y-1">
+        <label htmlFor="favorite-foods" className="text-xs text-neutral-500 uppercase tracking-wider">Foods you love</label>
+        <input id="favorite-foods" value={likes} onChange={e => setLikes(e.target.value)}
+          onBlur={() => updateProfile({ favoriteFoods: splitList(likes) })}
+          placeholder="e.g. pasta, pollo, mexicana, chocolate" className={inputClass} />
+        <p className="text-[11px] text-neutral-600">Separated by commas. These show up first.</p>
+      </div>
+    </section>
   );
 }
 

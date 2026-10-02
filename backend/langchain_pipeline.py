@@ -288,10 +288,10 @@ Tu tarea es tomar un texto crudo que describe una receta y convertirlo en un JSO
 REGLAS ESTRICTAS:
 1. Responde ÚNICAMENTE con JSON válido, sin markdown, sin bloques de código, sin texto adicional.
 2. Si el texto dice 'NO_ES_RECETA', devuelve exactamente: {{"nombre": null}}
-3. Si el tiempo no se menciona, usa null. Si las porciones no se mencionan explícitamente, infiérelas lógicamente basándote en las cantidades de los ingredientes (ej: 250g de pasta suele ser 2 porciones). Si no hay cantidades, usa 1.
+3. Si el tiempo no se menciona, usa null. 'porciones' SOLO si el texto dice explícitamente cuántas porciones/personas rinde; si no lo dice, usa null (no adivines: se calculan después a partir de los ingredientes).
 4. Normaliza las cantidades: convierte tazas, cucharadas, etc. a gramos/ml cuando sea posible.
 5. Separa cada paso de las instrucciones como un elemento independiente de la lista.
-6. Genera una lista de 'tags' indicando el tipo de comida (ej: desayuno, almuerzo, cena, postre, snack) según los ingredientes y el estilo. IMPORTANTE: si la receta es una salsa, aderezo, dip, mermelada, crema untable, topping o cualquier acompañamiento que NO se coma solo como una comida o snack completo, NO le asignes tags de tipo de comida (desayuno/almuerzo/cena/snack) — en su lugar usa únicamente el tag "condimento" (junto con "salsa", "aderezo", "dip", etc. si aplica). Estos tags de tipo de comida son solo para platos que alguien serviría como esa comida completa por sí sola. Lo mismo para bebidas (chocolate caliente, té, café, jugos, electrolitos, mocktails): usa solo "bebida" y "otros", sin tags de tipo de comida.
+6. Genera una lista de 'tags' indicando el tipo de comida (ej: desayuno, almuerzo, cena, postre, snack) según los ingredientes y el estilo. IMPORTANTE: si la receta es una salsa, aderezo, dip, mermelada, crema untable, topping o cualquier acompañamiento que NO se coma solo como una comida o snack completo, NO le asignes tags de tipo de comida (desayuno/almuerzo/cena/snack) — en su lugar usa únicamente el tag "condimento" (junto con "salsa", "aderezo", "dip", etc. si aplica). Estos tags de tipo de comida son solo para platos que alguien serviría como esa comida completa por sí sola. Lo mismo para bebidas (chocolate caliente, té, café, jugos, electrolitos, mocktails): usa solo "bebida" y "otros", sin tags de tipo de comida. Y para suplementos o remedios caseros (magnesio en polvo, proteína en polvo, termogénicos): usa solo "suplemento" y "otros".
 7. Identifica el 'tipo_cocina' (ej: italiana, mexicana, asiática, mediterránea, americana, latina, fusión, etc.) según los ingredientes y técnicas usadas. Si no es claramente de ninguna tradición específica, usa "internacional".
 8. Clasifica 'dificultad' como "facil", "media" o "dificil", según la cantidad de pasos, técnicas involucradas y tiempo de preparación.
 
@@ -358,57 +358,34 @@ def structure_recipe(inputs: dict) -> dict:
 
 
 # ──────────────────────────────────────────────
-# PASO 3: Nutrition Calculator Chain
-# Calcula valores nutricionales y ajusta cantidades por número de personas
+# PASO 3: Nutrición y porciones
+# El LLM estima gramos/macros POR INGREDIENTE y Python suma, elige las
+# porciones y divide (ver nutrition_calc.py). Antes un solo prompt adivinaba
+# porciones y macros por porción por separado y no cuadraban entre sí.
 # ──────────────────────────────────────────────
 
-NUTRITION_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """Eres un nutricionista experto y calculador de macronutrientes.
-Tu tarea es calcular los valores nutricionales de una receta y ajustar las cantidades según el número de personas objetivo.
-
-CONSTANTES CALÓRICAS:
-- 1g de Grasa = 9 kcal
-- 1g de Proteína = 4 kcal  
-- 1g de Carbohidratos = 4 kcal
-- 1g de Azúcar = 4 kcal (subcategoría de carbohidratos)
-- 1g de Fibra = 2 kcal
-
-REGLAS:
-1. Responde ÚNICAMENTE con JSON válido, sin markdown, sin bloques de código.
-2. Los valores nutricionales deben ser POR PORCIÓN (del target_servings).
-3. Si la receta tiene valores nutricionales explícitos en el texto, úsalos. Si no, calcúlalos basándote en los ingredientes.
-4. Para ajustar ingredientes: multiplica cada cantidad por (target_servings / porciones_originales).
-5. Redondea cantidades a 1 decimal.
-
-Estructura JSON requerida:
-{{
-  "nutricion_por_porcion": {{
-    "calorias": 350,
-    "proteina_g": 25.0,
-    "carbohidratos_g": 40.0,
-    "grasa_g": 8.0,
-    "azucares_g": 5.0,
-    "fibra_g": 3.0
-  }},
-  "origen_nutricional": "Calculado por IA",
-  "porciones_originales": 4,
-  "porciones_ajustadas": 2,
-  "ingredientes_ajustados": [
-    {{"nombre": "nombre del ingrediente", "cantidad": 100.0, "unidad": "g"}}
-  ]
-}}"""),
-    ("human", """Receta estructurada:
-{structured_recipe_json}
-
-Porciones originales: {porciones_originales}
-Porciones objetivo (target): {target_servings}""")
-])
+def _scale_ingredients(ingredientes: list, factor: float) -> list:
+    """Multiplica las cantidades numéricas; "al gusto" y similares quedan igual."""
+    if factor == 1:
+        return ingredientes
+    scaled = []
+    for ing in ingredientes:
+        ing = dict(ing)
+        try:
+            ing["cantidad"] = round(float(ing["cantidad"]) * factor, 1)
+        except (KeyError, TypeError, ValueError):
+            pass
+        scaled.append(ing)
+    return scaled
 
 
 def calculate_nutrition(inputs: dict) -> dict:
     """
-    Paso 3: Calcula nutrición por porción y ajusta cantidades según target_servings.
+    Paso 3: Calcula nutrición por porción (coherente con los ingredientes) y
+    ajusta cantidades según target_servings.
     """
+    from nutrition_calc import calculate
+
     structured_recipe: dict = inputs["structured_recipe"]
     gemini_api_key: str = inputs.get("gemini_api_key") or get_env_var("GEMINI_API_KEY")
     target_servings: int = inputs.get("target_servings", 0)
@@ -424,59 +401,61 @@ def calculate_nutrition(inputs: dict) -> dict:
             }
         }
 
-    porciones_originales = structured_recipe.get("porciones", 1) or 1
+    ingredientes = structured_recipe.get("ingredientes", []) or []
+    try:
+        explicitas = int(structured_recipe.get("porciones") or 0) or None
+    except (TypeError, ValueError):
+        explicitas = None
+
+    try:
+        calc = calculate(
+            structured_recipe.get("nombre"), structured_recipe.get("tags", []), ingredientes,
+            texto=inputs.get("raw_text", ""), porciones_explicitas=explicitas, api_key=gemini_api_key,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Error calculando nutrición: {str(e)}")
+
+    if calc["status"] == "ok":
+        porciones_originales = calc["porciones"]
+        n = calc["nutricion_por_porcion"]
+        nutricion = {
+            "calorias": n["kcal"], "proteina_g": n["proteina_g"], "carbohidratos_g": n["carbohidratos_g"],
+            "grasa_g": n["grasa_g"], "azucares_g": n["azucares_g"], "fibra_g": n["fibra_g"],
+        }
+        origen = "Calculado por IA (por ingrediente)"
+    else:
+        # Sin cantidades no hay con qué calcular: no se inventan números.
+        porciones_originales = explicitas or 1
+        nutricion = {}
+        origen = "Sin cantidades: nutrición no calculada"
+
     # Si no se especifica target_servings, usar las porciones originales
     if not target_servings or target_servings <= 0:
         target_servings = porciones_originales
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-flash-lite-latest",
-        google_api_key=gemini_api_key,
-        temperature=0.0,
-    )
-    chain = NUTRITION_PROMPT | llm | JsonOutputParser()
-
-    try:
-        nutrition_data = chain.invoke({
-            "structured_recipe_json": json.dumps(structured_recipe, ensure_ascii=False),
-            "porciones_originales": porciones_originales,
-            "target_servings": target_servings,
-        })
-    except Exception:
-        # Fallback: parsear de texto
-        try:
-            response = (NUTRITION_PROMPT | llm).invoke({
-                "structured_recipe_json": json.dumps(structured_recipe, ensure_ascii=False),
-                "porciones_originales": porciones_originales,
-                "target_servings": target_servings,
-            })
-            text = response.content if hasattr(response, "content") else str(response)
-            match = re.search(r'\{[\s\S]*\}', text)
-            nutrition_data = json.loads(match.group(0)) if match else {}
-        except Exception as e:
-            raise RuntimeError(f"Error calculando nutrición: {str(e)}")
-
-    from video_utils import extract_end_frame
-    thumb_url = extract_end_frame(inputs.get("video_url", ""), inputs["media_id"])
+    from video_utils import extract_end_frame, save_remote_image
+    # Frame del video; si no es video (post de foto), se guarda la imagen misma.
+    thumb_url = (extract_end_frame(inputs.get("video_url", ""), inputs["media_id"])
+                 or save_remote_image(inputs.get("video_url", ""), inputs["media_id"]))
 
     # Construir receta final completa
     final_recipe = {
         "media_id": inputs["media_id"],
         "video_url": inputs.get("video_url", ""),
-        "thumbnail_url": thumb_url or inputs.get("video_url", ""),
+        "thumbnail_url": thumb_url,  # nunca la URL del CDN: caduca y puede ser un .mp4
         "is_recipe": True,
         "nombre": structured_recipe.get("nombre"),
         "tiempo_preparacion_min": structured_recipe.get("tiempo_preparacion_min"),
-        "porciones_originales": nutrition_data.get("porciones_originales", porciones_originales),
-        "porciones_ajustadas": nutrition_data.get("porciones_ajustadas", target_servings),
+        "porciones_originales": porciones_originales,
+        "porciones_ajustadas": target_servings,
         "tags": structured_recipe.get("tags", []),
         "tipo_cocina": structured_recipe.get("tipo_cocina"),
         "dificultad": structured_recipe.get("dificultad"),
-        "ingredientes": structured_recipe.get("ingredientes", []),
-        "ingredientes_ajustados": nutrition_data.get("ingredientes_ajustados", []),
+        "ingredientes": ingredientes,
+        "ingredientes_ajustados": _scale_ingredients(ingredientes, target_servings / porciones_originales),
         "instrucciones": structured_recipe.get("instrucciones", []),
-        "nutricion_por_porcion": nutrition_data.get("nutricion_por_porcion", {}),
-        "origen_nutricional": nutrition_data.get("origen_nutricional", "Calculado por IA"),
+        "nutricion_por_porcion": nutricion,
+        "origen_nutricional": origen,
     }
 
     return {

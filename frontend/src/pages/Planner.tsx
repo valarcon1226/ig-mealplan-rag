@@ -1,11 +1,24 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useStore } from '../lib/store';
-import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, ChevronLeft, ChevronRight, ChefHat } from 'lucide-react';
-import { Recipe } from '../lib/types';
+import { useStore, sumMacros } from '../lib/store';
+import { buildPlanFingerprint } from '../lib/mealprepStorage';
+import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, ChevronLeft, ChevronRight, ChefHat, Check, RefreshCw, Utensils } from 'lucide-react';
+import { Macros, Recipe } from '../lib/types';
+
+// Short stable id per generated plan, so checks from an old plan don't carry over.
+const planIdOf = (plan: any) => {
+  let h = 0;
+  for (const c of buildPlanFingerprint(plan)) h = (h * 31 + c.charCodeAt(0)) | 0;
+  return (h >>> 0).toString(36);
+};
+
+const mealMacros = (meal: any): Macros => ({
+  calories: meal.calorias || 0, protein: meal.proteinas || 0, carbs: meal.carbohidratos || 0,
+  fat: meal.grasas || 0, fiber: meal.fibra || 0, sugar: meal.azucar || 0,
+});
 
 export default function Planner() {
-  const { profile, recipes, updateDailyConsumption, dailyConsumption, setCurrentMealPlan, currentMealPlan } = useStore();
+  const { profile, recipes, setCurrentMealPlan, currentMealPlan, eatLog, logMeal, unlogMeal } = useStore();
   const [plan, setPlan] = useState<any>(currentMealPlan); // puede ser array o objeto
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -25,6 +38,11 @@ export default function Planner() {
 
   const [selectedMealIds, setSelectedMealIds] = useState<string[]>(['desayuno', 'almuerzo', 'cena']);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
+  // Plan meal the open recipe / replacement picker belongs to ("<planId>:<day>:<meal>").
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [replaceKey, setReplaceKey] = useState<string | null>(null);
+  const [replaceQuery, setReplaceQuery] = useState('');
+  const [realScore, setRealScore] = useState<number | null>(null);
 
   const toggleMeal = (id: string) => {
     if (selectedMealIds.includes(id)) {
@@ -52,13 +70,18 @@ export default function Planner() {
         body: JSON.stringify({
           dailyGoals: profile.dailyGoals,
           meals: mealsToSend,
-          num_days: numDays
+          num_days: numDays,
+          goal: profile.goal ?? 'maintain',
+          is_pregnant: !!profile.isPregnant,
+          restrictions: profile.dietaryRestrictions ?? [],
+          avoid: profile.avoidFoods ?? [],
+          likes: profile.favoriteFoods ?? []
         })
       });
       const data = await res.json();
       
       if (!res.ok) {
-        alert(data.error || "Failed to generate plan");
+        alert(data.detail || data.error || "Failed to generate plan");
         setPlan(null);
         setCurrentMealPlan(null);
       } else {
@@ -78,7 +101,8 @@ export default function Planner() {
     window.print();
   };
 
-  const openRecipeDetails = (meal: any) => {
+  const openRecipeDetails = (meal: any, key: string) => {
+    setSelectedKey(key);
     const recipeToOpen: Recipe = {
       id: String(meal.recipe_id),
       title: meal.nombre,
@@ -86,14 +110,7 @@ export default function Planner() {
       video_url: meal.video_url,
       ingredients: meal.ingredients || [],
       instructions: meal.instructions || [],
-      macros: {
-        calories: meal.calorias || 0,
-        protein: meal.proteinas || 0,
-        carbs: meal.carbohidratos || 0,
-        fat: meal.grasas || 0,
-        fiber: meal.fibra || 0,
-        sugar: meal.azucar || 0
-      },
+      macros: mealMacros(meal),
       servings: 1,
       categories: [],
       createdAt: Date.now()
@@ -101,22 +118,72 @@ export default function Planner() {
     setSelectedRecipe(recipeToOpen);
   };
 
+  const isWeekly = Array.isArray(plan);
+  const currentPlan = isWeekly ? plan[currentDayIndex] : plan;
+  const planId = planIdOf(plan);
+  const keyFor = (i: number) => `${planId}:${currentDayIndex}:${i}`;
+  const entryFor = (key: string) => eatLog.find(e => e.planKey === key);
+  const dayEntries = eatLog.filter(e => e.planKey?.startsWith(`${planId}:${currentDayIndex}:`));
+  const dayDone = dayEntries.length;
+  const dayMealCount = currentPlan?.meals?.length ?? 0;
+
+  // Real score = same backend formula as the planned one, over what was actually eaten.
+  // "Ate something else" entries have no macros, so they add no points.
+  const eatenTotals = sumMacros(dayEntries);
+  const eatenWithMacros = dayEntries.some(e => e.macros);
+  useEffect(() => {
+    if (!currentPlan?.targets || !eatenWithMacros) { setRealScore(null); return; }
+    let cancelled = false;
+    fetch('/api/intake-score', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        totals: {
+          calorias: eatenTotals.calories, proteinas: eatenTotals.protein, carbohidratos: eatenTotals.carbs,
+          grasas: eatenTotals.fat, fibra: eatenTotals.fiber, azucar: eatenTotals.sugar,
+        },
+        targets: currentPlan.targets,
+        goal: profile.goal ?? 'maintain',
+        is_pregnant: !!profile.isPregnant,
+      }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (!cancelled) setRealScore(d ? d.total : null); })
+      .catch(() => { if (!cancelled) setRealScore(null); });
+    return () => { cancelled = true; };
+  }, [JSON.stringify(eatenTotals), eatenWithMacros, planId, currentDayIndex]);
+
+  const toggleEaten = (meal: any, key: string) => {
+    const entry = entryFor(key);
+    if (entry) unlogMeal(entry.id);
+    else logMeal({ title: meal.nombre, recipeId: String(meal.recipe_id), planKey: key, macros: mealMacros(meal) });
+  };
+
+  const replaceWith = (recipe: Recipe | null) => {
+    if (!replaceKey) return;
+    const prev = entryFor(replaceKey);
+    if (prev) unlogMeal(prev.id);
+    // null = "ate something else" that isn't in the Cookbook: counts as eaten, no macros/points.
+    logMeal(recipe
+      ? { title: recipe.title, recipeId: recipe.id, planKey: replaceKey, macros: recipe.macros }
+      : { title: 'Comí otra cosa', planKey: replaceKey });
+    setReplaceKey(null);
+    setReplaceQuery('');
+  };
+
+  // "Add 1 Serving" from a plan meal checks that meal; otherwise it's a plain log entry.
   const eatRecipe = (recipe: Recipe) => {
-    updateDailyConsumption({
-      macros: {
-        calories: dailyConsumption.macros.calories + Math.round(recipe.macros.calories / recipe.servings),
-        protein: dailyConsumption.macros.protein + Math.round(recipe.macros.protein / recipe.servings),
-        carbs: dailyConsumption.macros.carbs + Math.round(recipe.macros.carbs / recipe.servings),
-        fat: dailyConsumption.macros.fat + Math.round(recipe.macros.fat / recipe.servings),
-        fiber: dailyConsumption.macros.fiber + Math.round(recipe.macros.fiber / recipe.servings),
-        sugar: dailyConsumption.macros.sugar + Math.round(recipe.macros.sugar / recipe.servings),
-      }
-    });
+    if (selectedKey && !entryFor(selectedKey)) {
+      logMeal({ title: recipe.title, recipeId: recipe.id, planKey: selectedKey, macros: recipe.macros });
+    } else {
+      logMeal({ title: recipe.title, recipeId: recipe.id, macros: recipe.macros });
+    }
     setSelectedRecipe(null);
   };
 
-  const isWeekly = Array.isArray(plan);
-  const currentPlan = isWeekly ? plan[currentDayIndex] : plan;
+  const replaceOptions = recipes
+    .filter(r => r.title.toLowerCase().includes(replaceQuery.toLowerCase()))
+    .slice(0, 30);
 
   return (
     <div className="p-4 max-w-lg mx-auto space-y-6 pt-8 print:pt-0 pb-20 print:pb-0 relative">
@@ -218,33 +285,86 @@ export default function Planner() {
             <>
               <div className="bg-neutral-900/50 p-4 rounded-xl border border-neutral-800/50">
                 <div className="flex justify-between items-center mb-2">
-                    <span className="text-neutral-400 text-sm">Fitness Score (Day {currentPlan.day || 1})</span>
-                    <span className="text-orange-500 font-bold">{Math.round(currentPlan.score)}</span>
+                    <span className="text-neutral-400 text-sm">Intake Score (Day {currentPlan.day || 1})</span>
+                    <span className="text-sm text-neutral-400">
+                      Planeado <span className="text-orange-500 font-bold">{Math.round(currentPlan.score)}</span>
+                      {realScore != null && <> · Real <span className="text-green-400 font-bold">{realScore}</span></>}
+                      <span className="text-neutral-600 text-xs">/100</span>
+                    </span>
                 </div>
-                <div className="grid grid-cols-4 gap-2 text-center text-xs">
-                    <div className="bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500 mb-1">Cals</div><div className="font-bold text-orange-400">{Math.round(currentPlan.totals.calorias)}</div></div>
-                    <div className="bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500 mb-1">Pro</div><div className="font-bold text-white">{Math.round(currentPlan.totals.proteinas)}g</div></div>
-                    <div className="bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500 mb-1">Carb</div><div className="font-bold text-white">{Math.round(currentPlan.totals.carbohidratos)}g</div></div>
-                    <div className="bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500 mb-1">Fat</div><div className="font-bold text-white">{Math.round(currentPlan.totals.grasas)}g</div></div>
+                <div className="text-xs text-neutral-500 mb-2">
+                  <span className={dayDone === dayMealCount && dayMealCount > 0 ? 'text-green-400 font-bold' : 'text-white font-bold'}>{dayDone}/{dayMealCount}</span> comidas
+                  {eatenWithMacros && <> · {Math.round(eatenTotals.calories)} kcal reales</>}
+                </div>
+                {currentPlan.score_breakdown && (
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 mb-3 text-[10px] text-neutral-500">
+                    {([['calorias', 'Cal', 45], ['proteinas', 'Pro', 20], ['carbohidratos', 'Carb', 15], ['grasas', 'Fat', 10], ['fibra', 'Fib', 5], ['azucar', 'Azú', 5]] as const).map(([key, label, max]) => (
+                      <span key={key}>{label} <span className={currentPlan.score_breakdown[key] >= max ? 'text-green-400' : 'text-white'}>{Math.round(currentPlan.score_breakdown[key])}</span>/{max}</span>
+                    ))}
+                  </div>
+                )}
+                <div className="flex gap-2 text-center text-xs">
+                    <div className="w-1/3 shrink-0 bg-black p-3 rounded border border-neutral-800 flex flex-col items-center justify-center">
+                      <div className="text-neutral-500 mb-1">Calorías</div>
+                      <div className="text-3xl font-bold text-orange-400 leading-none">{Math.round(currentPlan.totals.calorias)}</div>
+                      <div className="text-neutral-600 mt-1">{currentPlan.targets?.calorias != null ? `/ ${Math.round(currentPlan.targets.calorias)} kcal` : 'kcal'}</div>
+                    </div>
+                    <div className="flex-1 grid grid-cols-6 gap-2">
+                      <div className="col-span-2 bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500">Pro</div><div className="font-bold text-white">{Math.round(currentPlan.totals.proteinas)}g</div></div>
+                      <div className="col-span-2 bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500">Carb</div><div className="font-bold text-white">{Math.round(currentPlan.totals.carbohidratos)}g</div></div>
+                      <div className="col-span-2 bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500">Fat</div><div className="font-bold text-white">{Math.round(currentPlan.totals.grasas)}g</div></div>
+                      <div className="col-span-3 bg-black p-2 rounded border border-neutral-800">
+                        <div className="text-neutral-500">Fibra</div>
+                        <div className={`font-bold ${(currentPlan.totals.fibra ?? 0) >= (currentPlan.targets?.fibra ?? 0) ? 'text-green-400' : 'text-white'}`}>
+                          {Math.round(currentPlan.totals.fibra ?? 0)}g
+                        </div>
+                        {currentPlan.targets?.fibra != null && <div className="text-neutral-600">/ {currentPlan.targets.fibra}g</div>}
+                      </div>
+                      <div className="col-span-3 bg-black p-2 rounded border border-neutral-800">
+                        <div className="text-neutral-500">Azúcar</div>
+                        <div className={`font-bold ${currentPlan.targets?.azucares != null && (currentPlan.totals.azucar ?? 0) > currentPlan.targets.azucares ? 'text-red-400' : 'text-white'}`}>
+                          {Math.round(currentPlan.totals.azucar ?? 0)}g
+                        </div>
+                        {currentPlan.targets?.azucares != null && <div className="text-neutral-600">máx {currentPlan.targets.azucares}g</div>}
+                      </div>
+                    </div>
                 </div>
               </div>
 
               <div className="space-y-4 print:text-black print:bg-white pb-4">
                 <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 print:border-gray-300 print:bg-white print:-mx-4">
                   <div className="space-y-4">
-                    {currentPlan.meals.map((meal: any, i: number) => (
-                      <div 
-                        key={i} 
-                        onClick={() => openRecipeDetails(meal)}
-                        className="flex gap-3 text-sm p-2 rounded-lg hover:bg-neutral-800 transition-colors cursor-pointer group"
-                      >
-                        <div className="w-20 shrink-0 text-orange-500 font-bold uppercase text-xs mt-1">{meal.meal_type}</div>
-                        <div>
-                            <div className="text-white group-hover:text-orange-400 transition-colors print:text-black font-medium">{meal.nombre}</div>
+                    {currentPlan.meals.map((meal: any, i: number) => {
+                      const key = keyFor(i);
+                      const entry = entryFor(key);
+                      const replaced = entry && entry.recipeId !== String(meal.recipe_id);
+                      return (
+                        <div key={i} className="flex gap-3 text-sm p-2 rounded-lg hover:bg-neutral-800 transition-colors group">
+                          <button
+                            onClick={() => toggleEaten(meal, key)}
+                            aria-pressed={!!entry}
+                            aria-label={entry ? `Desmarcar ${meal.meal_type}` : `Marcar ${meal.meal_type} como comido`}
+                            className={`w-6 h-6 mt-0.5 shrink-0 rounded-full border flex items-center justify-center print:hidden ${entry ? 'bg-green-500 border-green-500 text-black' : 'border-neutral-600 text-transparent hover:border-green-500'}`}
+                          >
+                            <Check className="w-4 h-4" />
+                          </button>
+                          <div className="w-20 shrink-0 text-orange-500 font-bold uppercase text-xs mt-1">{meal.meal_type}</div>
+                          <div className="flex-1 min-w-0 cursor-pointer" onClick={() => openRecipeDetails(meal, key)}>
+                            <div className={`group-hover:text-orange-400 transition-colors print:text-black font-medium ${replaced ? 'line-through text-neutral-500' : 'text-white'}`}>{meal.nombre}</div>
+                            {replaced && <div className="text-green-400 text-xs mt-0.5">→ {entry!.title}</div>}
                             <div className="text-neutral-500 text-xs mt-1">{meal.calorias} kcal · {meal.proteinas}g pro</div>
+                          </div>
+                          <button
+                            onClick={() => setReplaceKey(key)}
+                            aria-label={`Cambiar ${meal.meal_type}: comí otra cosa`}
+                            title="Comí otra cosa"
+                            className="p-1.5 h-fit rounded-lg text-neutral-500 hover:text-white hover:bg-neutral-700 print:hidden"
+                          >
+                            <RefreshCw className="w-4 h-4" />
+                          </button>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               </div>
@@ -265,6 +385,45 @@ export default function Planner() {
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Regenerate Plan"}
           </button>
+        </div>
+      )}
+
+      {/* MODAL: COMÍ OTRA COSA (reemplazo de una comida del plan) */}
+      {replaceKey && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-end sm:items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="replace-title">
+          <div className="bg-neutral-950 border border-neutral-800 w-full max-w-md rounded-3xl overflow-hidden shadow-2xl max-h-[80vh] flex flex-col">
+            <div className="p-4 border-b border-neutral-800">
+              <div className="flex justify-between items-center mb-3">
+                <h2 id="replace-title" className="text-lg font-bold text-white">¿Qué comiste en vez?</h2>
+                <button onClick={() => { setReplaceKey(null); setReplaceQuery(''); }} aria-label="Cerrar" className="text-neutral-500 hover:text-white p-2">✕</button>
+              </div>
+              <input
+                type="search"
+                autoFocus
+                value={replaceQuery}
+                onChange={e => setReplaceQuery(e.target.value)}
+                placeholder="Buscar en el Cookbook..."
+                aria-label="Buscar receta del Cookbook"
+                className="w-full bg-neutral-900 border border-neutral-800 text-white rounded-xl py-2 px-3 text-sm focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <ul className="overflow-y-auto flex-1 p-2">
+              {replaceOptions.map(r => (
+                <li key={r.id}>
+                  <button onClick={() => replaceWith(r)} className="w-full text-left p-3 rounded-lg hover:bg-neutral-800 text-sm">
+                    <div className="text-white">{r.title}</div>
+                    <div className="text-neutral-500 text-xs">{Math.round(r.macros.calories)} kcal · {Math.round(r.macros.protein)}g pro</div>
+                  </button>
+                </li>
+              ))}
+              {replaceOptions.length === 0 && <li className="p-3 text-sm text-neutral-500">No hay recetas con ese nombre.</li>}
+            </ul>
+            <div className="p-4 border-t border-neutral-800">
+              <button onClick={() => replaceWith(null)} className="w-full bg-neutral-900 border border-neutral-700 text-white py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
+                <Utensils className="w-4 h-4" /> No está en el Cookbook (no suma puntos)
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -78,7 +78,7 @@ flowchart TD
         GarminSDK["GarminConnect Lib"]
     end
 
-    subgraph BackendPython["🐍 FastAPI (:8001)"]
+    subgraph BackendPython["🐍 FastAPI (:8011)"]
         FastAPI["FastAPI Endpoints"]
         LangChain["LangChain Pipeline"]
         RAG["RAG Planner"]
@@ -307,8 +307,14 @@ Genera planes nutricionales personalizados combinando búsqueda vectorial + LLM:
 3. **Relajación progresiva** — Si hay pocos candidatos, amplía los límites
 4. **Prompt dinámico al LLM** — Instrucciones estrictas de variedad, prohibición de suplementos, y respeto a restricciones
 5. **Rehidratación desde SQLite** — Mapea ingredientes e instrucciones completas
-6. **Reajuste calórico por día (`_rebalance_day`)** — El LLM no suma bien (un día podía quedar en 2213 kcal con la meta más abajo). La meta diaria es un **techo**: mientras el día se pase (o quede más de 10% por debajo, `CAL_MARGIN`), se toma la comida que más se desvía hacia ese lado, se buscan más recetas de ese tipo en ChromaDB dentro de su rango normal (`[70%, 130%]` de su objetivo), se arman 3 opciones que dejen el día sin pasarse de la meta y se elige la de más proteína. Si no alcanza, sigue con otra comida; si con porciones normales no baja, permite comidas de hasta 30% de su objetivo. Tope de `4 × comidas` búsquedas por día.
-7. **Scoring** — `score = diff_cals + diff_prot * 10` (menor es mejor)
+6. **Reajuste calórico por día (`_rebalance_day`)** — El LLM no suma bien (un día podía quedar en 2213 kcal con la meta más abajo). La meta diaria es un **techo**: mientras el día se pase (o quede más de 10% por debajo, `CAL_MARGIN`), se toma la comida que más se desvía hacia ese lado, se buscan más recetas de ese tipo en ChromaDB dentro de su rango normal (`[70%, 130%]` de su objetivo), se arman 3 opciones que dejen el día sin pasarse de la meta y se elige la que deja proteína y fibra más cerca de su meta. Si no alcanza, sigue con otra comida; si con porciones normales no baja, permite comidas de hasta 30% de su objetivo. Tope de `4 × comidas` búsquedas por día.
+   Después, con las calorías en rango, si la proteína se pasa más de 10%, falta fibra o sobra azúcar, hace dos pasadas por las comidas probando reemplazos que mantengan las calorías en `[90%, 100%]` de la meta y bajen `|proteína − meta| + 2 × fibra faltante + azúcar de más`. Repetir una receta ya usada en otro día del plan suma `REPEAT_PENALTY` (8) por día, para mantener variedad sin prohibirla (hay pocas recetas altas en fibra).
+   **Fibra y azúcar:** la meta de fibra es la del perfil (25 g, o 30 g en embarazo) y sube en proporción a cuánto se pasa la proteína (ej. +25% de proteína → +25% de fibra); el azúcar es un máximo (5% de las calorías). Cada día devuelve `totals.fibra`, `totals.azucar` y `targets.fibra` (ya ajustada), y el Planner las muestra junto a las otras macros (fibra en verde si se cumple, azúcar en rojo si se pasa). Los candidatos que ve el LLM también incluyen fibra y azúcar.
+   **Límite conocido:** en el recetario, las recetas altas en fibra suelen ser bajas en proteína, así que con el tope de calorías a veces un día queda corto de fibra para no bajar la proteína.
+7. **Intake Score (0-100, mayor es mejor)** — `intake_score()` reparte 100 puntos: calorías 45, proteína 20, carbs 15, grasa 10, fibra 5, azúcar 5, con puntaje parcial lineal:
+   - **Calorías, carbs y grasa:** rango según `goal` (fracción de la meta; puntaje completo → 0 pts): `lose` 80–100% (0 en 60% / 120%), `gain` 90–110% (0 en 70% / 130%), `maintain` 95–105% (0 en 75% / 125%). En embarazo siempre se usa `maintain`.
+   - **Proteína:** mínimo, proporcional hasta la meta; sobre 130% resta un poco (0 al 230%). **Fibra:** mínimo proporcional (con la meta ajustada). **Azúcar:** máximo, 0 al 150% del tope.
+   - Cada día devuelve `score` y `score_breakdown`; el request acepta `goal` e `is_pregnant`.
 
 ---
 
@@ -577,7 +583,7 @@ Dos modos de importación:
 Planificador con IA:
 - Número de días a planificar configurable (1-14)
 - Selector de comidas (desayuno, almuerzo, cena, snacks, postre)
-- Fitness Score y dashboard de macros acumulados
+- Intake Score (0-100, con desglose por métrica) y dashboard de macros acumulados
 - Navegación día por día con flechas
 - Exportar a PDF via `window.print()`
 - Botón hacia Mealprep con el plan activo
@@ -614,10 +620,10 @@ Servidor Node.js que funciona como **API Gateway inteligente**:
 |-----------|-----------|---------|
 | **Garmin** | `POST /api/garmin/login`, `POST /api/garmin/calories` | garmin-connect SDK |
 | **IA Directa** | `POST /api/analyze-recipe`, `POST /api/generate-plan` | Google GenAI SDK (Gemini 2.5 Flash) |
-| **Instagram** | `POST /api/ig/*` | FastAPI (:8001) con proxy |
-| **Datos** | `GET /api/recipes`, CRUD `/api/pantry`, `POST /api/mealplan/generate`, `POST /api/mealprep/generate` | FastAPI (:8001) |
+| **Instagram** | `POST /api/ig/*` | FastAPI (:8011) con proxy |
+| **Datos** | `GET /api/recipes`, CRUD `/api/pantry`, `POST /api/mealplan/generate`, `POST /api/mealprep/generate` | FastAPI (:8011) |
 | **Webhook** | `POST /api/send-webhook` | URL externa (n8n) |
-| **Catch-all** | `ALL /api/*` | FastAPI (:8001) con cabeceras IG |
+| **Catch-all** | `ALL /api/*` | FastAPI (:8011) con cabeceras IG |
 
 **Configuración especial:**
 - Timeout de keep-alive: 5 minutos (para análisis largos de video)
@@ -824,6 +830,7 @@ Scripts de mantenimiento (ya consolidados en el código fuente, conservados como
 | [backfill_sugars_fiber.py](../backend/backfill_sugars_fiber.py) | Copia azúcares/fibra de `recetas_db.json` a SQLite |
 | [backfill_cuisine_difficulty.py](../backend/backfill_cuisine_difficulty.py) | Rellena `cuisine_type` y `dificultad` de recetas existentes |
 | [backfill_drink_tags.py](../backend/backfill_drink_tags.py) | Retaguea bebidas como `bebida, otros` para excluirlas del planner |
+| [backfill_supplement_tags.py](../backend/backfill_supplement_tags.py) | Retaguea suplementos (magnesio/proteína en polvo, termogénicos) como `suplemento, otros` para excluirlos del planner |
 
 Tras cualquier backfill que cambie tags o metadatos, reindexar Chroma con `populate_db.py`.
 
@@ -852,7 +859,7 @@ echo GEMINI_API_KEY=tu-clave > .env
 python init_db.py
 
 # Ejecutar servidor
-uvicorn ig_recetas:app --host 0.0.0.0 --port 8001 --reload
+uvicorn ig_recetas:app --host 0.0.0.0 --port 8011 --reload
 ```
 
 ### Frontend
@@ -877,12 +884,12 @@ npm start
 ### Túnel (Ngrok) — Solo si frontend está en la nube
 
 ```bash
-ngrok http 8001
+ngrok http 8011
 # Copiar la URL https://xxx.ngrok-free.dev al frontend
 ```
 
 > [!TIP]
-> Para desarrollo local completo, el frontend en `:4000` ya hace proxy automático hacia el backend en `:8001`. No necesitas Ngrok.
+> Para desarrollo local completo, el frontend en `:4000` ya hace proxy automático hacia el backend en `:8011`. No necesitas Ngrok.
 
 ---
 

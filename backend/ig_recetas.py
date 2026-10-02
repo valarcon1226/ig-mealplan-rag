@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Literal
 from instagrapi.exceptions import LoginRequired, ChallengeRequired
 
 from ig_auth import get_client_for_user
@@ -775,7 +775,7 @@ def list_recipes():
             "ingredients": ingredientes_mapped,
             "instructions": r.get("instrucciones", []),
             "categories": r.get("tags") or ["Instagram"],
-            "thumbnail_url": r.get("video_url", "")
+            "thumbnail_url": r.get("thumbnail_url", "")
         })
     return {"total": len(mapped_recipes), "recipes": mapped_recipes}
 
@@ -863,10 +863,15 @@ class MealPlanRequest(BaseModel):
     restrictions: list = []
     cycle_phase: str = ""
     num_days: int = 1
+    goal: Literal["lose", "maintain", "gain"] = "maintain"
+    is_pregnant: bool = False
+    avoid: List[str] = []   # no me gusta / alergias (filtro duro)
+    likes: List[str] = []   # comidas favoritas (se priorizan)
 
 @app.get("/api/recipes")
 def get_all_recipes():
     from database import SessionLocal
+    from diet import diet_labels
     from models import Recipe
     db = SessionLocal()
     recipes = db.query(Recipe).all()
@@ -903,6 +908,7 @@ def get_all_recipes():
             "video_url": r.video_url,
             "thumbnail_url": r.thumbnail_url,
             "servings": r.servings,
+            "cuisine": r.cuisine_type,
             "categories": r.tags.split(",") if r.tags else [],
             "instructions": instructions,
             "ingredients": ing_mapped,
@@ -910,11 +916,63 @@ def get_all_recipes():
                 "calories": r.nutrition.calories if r.nutrition else 0,
                 "protein": r.nutrition.proteins if r.nutrition else 0,
                 "carbs": r.nutrition.carbohydrates if r.nutrition else 0,
-                "fat": r.nutrition.fats if r.nutrition else 0
-            }
+                "fat": r.nutrition.fats if r.nutrition else 0,
+                "fiber": (r.nutrition.fiber or 0) if r.nutrition else 0,
+                "sugar": (r.nutrition.sugars or 0) if r.nutrition else 0,
+            },
+            # Dietas que cumple (diet.py); el Cookbook filtra con esto según el perfil.
+            "diet": diet_labels(
+                r.tags.split(",") if r.tags else [],
+                [i.get("nombre") or i.get("ingrediente") or "" for i in ing_raw if isinstance(i, dict)],
+                r.nutrition.sugars if r.nutrition else None,
+            ),
         })
     db.close()
     return result
+
+class RecipeSearchRequest(BaseModel):
+    q: str
+
+@app.post("/api/recipes/search")
+def search_recipes(req: RecipeSearchRequest):
+    """
+    Búsqueda en lenguaje natural (ver recipe_search.py): el LLM la convierte en
+    filtros y Chroma ordena por similitud. Devuelve ids de SQLite en orden de
+    relevancia y los filtros que entendió, para mostrarlos en el Cookbook.
+    """
+    from database import SessionLocal
+    from models import Recipe
+    from recipe_search import search
+
+    q = req.q.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="La búsqueda está vacía.")
+    if len(q) > 200:
+        raise HTTPException(status_code=400, detail="La búsqueda es muy larga (máx. 200 caracteres).")
+    try:
+        result = search(q.lower())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"No se pudo buscar: {e}")
+
+    db = SessionLocal()
+    try:
+        id_by_media = dict(db.query(Recipe.media_id, Recipe.id).all())
+    finally:
+        db.close()
+    ids = [str(id_by_media[m]) for m in result["media_ids"] if m in id_by_media]
+    return {"ids": list(dict.fromkeys(ids)), "filters": result["filters"]}
+
+class IntakeScoreRequest(BaseModel):
+    totals: Dict[str, float]   # calorias, proteinas, carbohidratos, grasas, fibra, azucar
+    targets: Dict[str, float]  # las metas del día tal como vienen en el plan
+    goal: Literal["lose", "maintain", "gain"] = "maintain"
+    is_pregnant: bool = False
+
+@app.post("/api/intake-score")
+def score_intake(body: IntakeScoreRequest):
+    """Puntaje real de lo comido, con la misma fórmula que el puntaje planeado del plan."""
+    from rag_planner import intake_score
+    return intake_score(body.totals, body.targets, goal=body.goal, is_pregnant=body.is_pregnant)
 
 @app.post("/api/mealplan/generate")
 def generate_mealplan(request: MealPlanRequest):
@@ -941,7 +999,9 @@ def generate_mealplan(request: MealPlanRequest):
             target_macros=targets,
             restrictions=request.restrictions,
             cycle_phase=request.cycle_phase,
-            num_days=num_days
+            num_days=num_days,
+            profile={"goal": request.goal, "is_pregnant": request.is_pregnant,
+                     "avoid": request.avoid, "likes": request.likes},
         )
     except Exception as e:
         db.close()
@@ -993,17 +1053,29 @@ def add_pantry_item(item: PantryItemCreate):
     """
     from database import SessionLocal
     from models import PantryItem
-    from ingredient_normalizer import parse_amount_str
+    from ingredient_normalizer import parse_amount_str, normalize_ingredient_name
+    from shopping_list import to_canonical, parse_free_text
+
+    name_clean = item.name.strip()
+    amount = (item.amount or "").strip()
+    if not amount:
+        # Input manual en una sola línea: "1lb de arroz" -> ("arroz", "1 lb")
+        name_clean, amount = parse_free_text(name_clean)
+    item.amount = amount or None
+    if not name_clean:
+        raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
 
     db = SessionLocal()
     try:
-        name_clean = item.name.strip()
-        existing = db.query(PantryItem).filter(PantryItem.name.ilike(name_clean)).first()
+        # "Huevos" y "huevo" son el mismo item; el pantry es chico, se recorre entero.
+        norm = normalize_ingredient_name(name_clean) or name_clean.lower()
+        existing = next((p for p in db.query(PantryItem).all()
+                         if (normalize_ingredient_name(p.name) or p.name.lower()) == norm), None)
 
         if existing:
-            new_qty, new_unit = parse_amount_str(str(item.amount or ""))
-            old_qty, old_unit = parse_amount_str(str(existing.amount or ""))
-            if new_qty and old_qty and new_unit.strip().lower() == old_unit.strip().lower():
+            new_qty, new_unit = to_canonical(*parse_amount_str(str(item.amount or "")))
+            old_qty, old_unit = to_canonical(*parse_amount_str(str(existing.amount or "")))
+            if new_qty and old_qty and new_unit == old_unit:
                 total = old_qty + new_qty
                 existing.amount = f"{total:g} {new_unit}".strip()
                 db.commit()
@@ -1017,6 +1089,90 @@ def add_pantry_item(item: PantryItemCreate):
         return {"id": new_item.id, "name": new_item.name, "amount": new_item.amount}
     finally:
         db.close()
+
+class PantryRemoveByName(BaseModel):
+    name: str
+
+@app.post("/api/pantry/remove")
+def remove_pantry_ingredient(item: PantryRemoveByName):
+    """
+    Al desmarcar un item de la grocery list ("no lo tengo"): borra ese
+    ingrediente del pantry, con el mismo matching de nombre que usa la lista
+    ("Huevos" == "huevo"). Restar solo lo necesario dejaría el item cubierto
+    si había stock de sobra, y el check volvería a marcarse solo.
+    """
+    from database import SessionLocal
+    from models import PantryItem
+    from ingredient_normalizer import normalize_ingredient_name
+
+    name_clean = item.name.strip()
+    if not name_clean:
+        raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+
+    db = SessionLocal()
+    try:
+        norm = normalize_ingredient_name(name_clean) or name_clean.lower()
+        for p in db.query(PantryItem).all():
+            if (normalize_ingredient_name(p.name) or p.name.lower()) == norm:
+                db.delete(p)
+        db.commit()
+        return {"status": "ok"}
+    finally:
+        db.close()
+
+class ReceiptScanRequest(BaseModel):
+    image: str  # data URL: "data:image/jpeg;base64,..."
+
+class ReceiptItem(BaseModel):
+    name: str
+    amount: str = ""
+
+class ReceiptItems(BaseModel):
+    items: List[ReceiptItem]
+
+RECEIPT_PROMPT = (
+    "Eres un asistente que lee recibos de supermercado. Extrae SOLO alimentos e "
+    "ingredientes (ignora bolsas, productos de limpieza, impuestos, descuentos y totales).\n"
+    "- name: nombre genérico en español, en singular y minúsculas, SIN marca, sabor "
+    "comercial ni tamaño (ej. 'ARROZ DIANA 1KG' -> 'arroz', 'LECHE ALQUERIA ENT' -> 'leche').\n"
+    "- amount: cantidad TOTAL comprada con unidad (g, kg, ml, l, lb, oz o sin unidad para "
+    "piezas). Multiplica unidades x tamaño del paquete (2 x arroz 1kg -> '2 kg'). Si el "
+    "recibo no indica el tamaño, usa solo el número de unidades (ej. '1').\n"
+    "- Si el mismo alimento aparece varias veces, únelo en una sola entrada.\n"
+    "Si la imagen no es un recibo, devuelve items vacío."
+)
+
+@app.post("/api/pantry/receipt")
+def scan_receipt(req: ReceiptScanRequest):
+    """
+    Lee una foto de un recibo con Gemini y devuelve los alimentos con nombre
+    genérico (sin marca). NO guarda nada: el frontend muestra la lista para que
+    el usuario la revise/edite y luego agrega cada item con POST /api/pantry.
+    """
+    from rag_chatbot import get_llm
+    from langchain_core.messages import HumanMessage
+
+    m = re.match(r"^data:(image/(?:jpeg|png|webp|heic|heif));base64,", req.image)
+    if not m:
+        raise HTTPException(status_code=400, detail="Sube una imagen JPG, PNG, WEBP o HEIC del recibo.")
+    if len(req.image) > 14_000_000:  # ~10 MB de imagen en base64
+        raise HTTPException(status_code=413, detail="La imagen es muy grande (máx. 10 MB).")
+
+    llm = get_llm()
+    if not llm:
+        raise HTTPException(status_code=500, detail="El LLM no está configurado (falta GEMINI_API_KEY).")
+
+    try:
+        result = llm.with_structured_output(ReceiptItems).invoke([HumanMessage(content=[
+            {"type": "text", "text": RECEIPT_PROMPT},
+            {"type": "image_url", "image_url": req.image},
+        ])])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"No se pudo leer el recibo: {e}")
+
+    items = [{"name": i.name.strip(), "amount": i.amount.strip()}
+             for i in (result.items if result else []) if i.name.strip()]
+    return {"items": items}
 
 @app.delete("/api/pantry/{item_id}")
 def delete_pantry_item(item_id: int):

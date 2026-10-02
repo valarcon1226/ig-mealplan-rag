@@ -3,6 +3,27 @@ import os
 import requests
 import tempfile
 
+def save_remote_image(url: str, media_id: str) -> str:
+    """
+    Guarda localmente una imagen remota (p. ej. la portada de un post de foto).
+    Las URLs del CDN de Instagram caducan, así que nunca se guarda la URL tal cual.
+    Devuelve la ruta relativa o "" si la URL no es una imagen o falla la descarga.
+    """
+    if not url:
+        return ""
+    try:
+        resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.ok and resp.headers.get("Content-Type", "").startswith("image/"):
+            os.makedirs("static/thumbnails", exist_ok=True)
+            filename = f"{media_id}.jpg"
+            with open(os.path.join("static/thumbnails", filename), "wb") as f:
+                f.write(resp.content)
+            return f"/static/thumbnails/{filename}"
+    except requests.RequestException as e:
+        print(f"Error saving image for {media_id}: {e}")
+    return ""
+
+
 def extract_end_frame(video_url: str, media_id: str, local_video_path: str = None, target_timestamp: float = None) -> str:
     """
     Extrae un frame específico de un video usando OpenCV.
@@ -19,7 +40,7 @@ def extract_end_frame(video_url: str, media_id: str, local_video_path: str = Non
     filepath = os.path.join(output_dir, filename)
     
     if os.path.exists(filepath):
-        return f"http://localhost:8001/static/thumbnails/{filename}"
+        return f"/static/thumbnails/{filename}"  # relativa: el frontend la reenvía al backend
         
     temp_path = local_video_path
     cleanup_temp = False
@@ -59,7 +80,7 @@ def extract_end_frame(video_url: str, media_id: str, local_video_path: str = Non
         
         if ret:
             cv2.imwrite(filepath, frame)
-            return f"http://localhost:8001/static/thumbnails/{filename}"
+            return f"/static/thumbnails/{filename}"  # relativa: el frontend la reenvía al backend
             
     except Exception as e:
         print(f"Error extracting frame: {e}")

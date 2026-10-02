@@ -12,37 +12,15 @@ def get_chroma_client():
     return chromadb.PersistentClient(path=DB_PATH)
 
 def infer_dietary_restrictions(recipe: Dict[str, Any]) -> List[str]:
-    """Infers dietary restrictions based on tags and ingredients."""
-    restrictions = set()
-    tags = [t.lower() for t in recipe.get("tags", [])]
-    
-    # 1. Tags check
-    if "vegetariano" in tags: restrictions.add("Vegetariano")
-    if "vegano" in tags: restrictions.add("Vegano")
-    if "sin gluten" in tags: restrictions.add("Sin Gluten")
-    if "sin lacteos" in tags or "sin lácteos" in tags: restrictions.add("Sin Lácteos")
-        
-    # 2. Ingredients check
+    """Restricciones de dieta que la receta cumple (ver diet.py)."""
+    from diet import diet_labels
     ingredientes = recipe.get("ingredientes_ajustados") or recipe.get("ingredientes", [])
-    ing_nombres = [ing.get("nombre", "").lower() for ing in ingredientes]
-    
-    meat_keywords = ["pollo", "carne", "res", "cerdo", "tocino", "bacon", "pescado", "atun", "atún", "salmon", "salmón", "camaron", "camarón", "marisco", "pavo", "jamon", "jamón", "salchicha"]
-    animal_keywords = meat_keywords + ["queso", "leche", "huevo", "huevos", "mantequilla", "miel", "yogurt", "crema", "suero", "ghee"]
-    lactose_keywords = ["queso", "leche", "mantequilla", "yogurt", "crema", "suero"]
-    
-    has_meat = any(any(mk in ing for mk in meat_keywords) for ing in ing_nombres)
-    has_animal = any(any(ak in ing for ak in animal_keywords) for ing in ing_nombres)
-    has_lactose = any(any(lk in ing for lk in lactose_keywords) for ing in ing_nombres)
-    
-    if not has_meat:
-        restrictions.add("Vegetariano")
-    if not has_animal:
-        restrictions.add("Vegano")
-        restrictions.add("Vegetariano")
-    if not has_lactose:
-        restrictions.add("Sin Lácteos")
-        
-    return sorted(list(restrictions))
+    nutricion = recipe.get("nutricion_por_porcion") or {}
+    return diet_labels(
+        recipe.get("tags", []),
+        [ing.get("nombre", "") for ing in ingredientes if isinstance(ing, dict)],
+        nutricion.get("azucares_g"),
+    )
 
 def load_recipes_data() -> List[Dict[str, Any]]:
     """

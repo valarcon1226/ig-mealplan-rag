@@ -25,6 +25,24 @@ export type Recipe = {
   thumbnail_url?: string;
   video_url?: string;
   media_id?: string; // id del post de IG; `id` es el id interno de SQLite
+  diet?: string[]; // dietas que cumple (backend diet.py), ej. "Vegano", "Apto Diabético"
+  cuisine?: string | null; // italiana, asiatica, mexicana, mediterranea...
+  favorite?: boolean;
+  rating?: number;      // 1-5 estrellas
+  timesEaten?: number;  // veces registradas con "Add 1 Serving"
+  lastEatenAt?: number;
+};
+
+// One eaten serving. planKey ties it to a meal of a plan ("<planId>:<day>:<mealIndex>").
+// No macros = "ate something else" (not in the Cookbook): counts as eaten, adds no points.
+export type EatEntry = {
+  id: string;
+  date: string; // YYYY-MM-DD
+  at: number;
+  title: string;
+  recipeId?: string;
+  planKey?: string;
+  macros?: Macros;
 };
 
 export type UserProfile = {
@@ -51,6 +69,9 @@ export type UserProfile = {
   prePregnancyWeight?: number;
   pregnancyDueDate?: string;
   igUsername?: string;
+  dietaryRestrictions?: string[]; // DIET_LABELS: filtro duro en Cookbook y planner
+  avoidFoods?: string[];          // no me gusta / alergias: filtro duro
+  favoriteFoods?: string[];       // le gusta: se priorizan
 };
 
 export type MealprepTaskResult = {

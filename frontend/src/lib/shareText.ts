@@ -11,6 +11,18 @@ export async function copyText(text: string) {
   }
 }
 
+// Direct links to apps: desktop share sheets (Windows) often offer only email.
+export function shareTargets(title: string, text: string) {
+  const t = encodeURIComponent(text);
+  return [
+    { label: 'WhatsApp', href: `https://wa.me/?text=${t}` },
+    { label: 'Telegram', href: `https://t.me/share/url?url=${encodeURIComponent(' ')}&text=${t}` },
+    { label: 'Email', href: `mailto:?subject=${encodeURIComponent(title)}&body=${t}` },
+  ];
+}
+
+export const canNativeShare = () => typeof navigator !== 'undefined' && !!navigator.share;
+
 export async function shareText(title: string, text: string) {
   if (navigator.share) {
     try { await navigator.share({ title, text }); } catch { /* user closed the share sheet */ }

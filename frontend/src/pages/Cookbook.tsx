@@ -1,11 +1,11 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useStore } from '../lib/store';
-import { Search, Plus, Minus, Copy, Share2, Printer, ShoppingCart, Heart, Sparkles, Loader2 } from 'lucide-react';
+import { Search, Plus, Minus, ShoppingCart, Heart, Sparkles, Loader2, SlidersHorizontal } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Recipe } from '../lib/types';
 import RecipeImport from './RecipeImport';
 import { GroceryList } from './Pantry';
-import { copyText, shareText, printText } from '../lib/shareText';
+import ExportButtons from '../lib/ExportButtons';
 import { fitsProfile, likeScore } from '../lib/diet';
 
 export default function Cookbook() {
@@ -44,6 +44,7 @@ function RecipesTab({ recipes, setAllRecipes }: any) {
   const [showAll, setShowAll] = useState(false);
   const [view, setView] = useState<View>('all');
   const [presets, setPresets] = useState<string[]>([]);
+  const [showFilters, setShowFilters] = useState(false);
   // AI search: the backend turns the query into filters + vector ranking.
   const [ai, setAi] = useState<{ query: string; ids: string[]; filters: Record<string, any> } | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
@@ -175,26 +176,46 @@ function RecipesTab({ recipes, setAllRecipes }: any) {
         </div>
       )}
 
-      <div className="flex gap-2 overflow-x-auto -mx-1 px-1 mb-6" role="tablist" aria-label="Recipe views">
-        {(Object.keys(VIEWS) as View[]).map(v => (
-          <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}
-            className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-bold border transition-colors ${view === v ? 'bg-orange-500 border-orange-500 text-black' : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'}`}>
-            {VIEWS[v].label}
-          </button>
-        ))}
+      <div className={`flex items-center gap-2 ${showFilters ? 'mb-3' : 'mb-6'}`}>
+        <div className="flex gap-2 flex-1 min-w-0 overflow-x-auto -mx-1 px-1" role="tablist" aria-label="Recipe views">
+          {(Object.keys(VIEWS) as View[]).map(v => (
+            <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}
+              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-bold border transition-colors ${view === v ? 'bg-orange-500 border-orange-500 text-black' : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'}`}>
+              {VIEWS[v].label}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => setShowFilters(s => !s)}
+          aria-expanded={showFilters}
+          aria-controls="cookbook-filters"
+          className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border transition-colors ${showFilters || presets.length ? 'bg-neutral-100 border-neutral-100 text-black' : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'}`}
+        >
+          <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden="true" />
+          Filtros{presets.length > 0 && ` (${presets.length})`}
+        </button>
       </div>
 
-      <div className="flex gap-2 overflow-x-auto -mx-1 px-1 -mt-3 mb-6" role="group" aria-label="Quick filters">
-        {PRESETS.map(f => {
-          const on = presets.includes(f.label);
-          return (
-            <button key={f.label} onClick={() => togglePreset(f.label)} aria-pressed={on}
-              className={`shrink-0 px-3 py-1 rounded-lg text-[11px] font-bold border transition-colors ${on ? 'bg-neutral-100 border-neutral-100 text-black' : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white'}`}>
-              {f.label}
+      {showFilters && (
+        <div id="cookbook-filters" role="group" aria-label="Filtros rápidos" className="bg-neutral-900 border border-neutral-800 rounded-2xl p-3 mb-6">
+          <div className="flex flex-wrap gap-2">
+            {PRESETS.map(f => {
+              const on = presets.includes(f.label);
+              return (
+                <button key={f.label} onClick={() => togglePreset(f.label)} aria-pressed={on}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${on ? 'bg-orange-500 border-orange-500 text-black' : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white'}`}>
+                  {f.label}
+                </button>
+              );
+            })}
+          </div>
+          {presets.length > 0 && (
+            <button onClick={() => setPresets([])} className="mt-3 text-xs text-neutral-400 hover:text-white underline">
+              Limpiar filtros
             </button>
-          );
-        })}
-      </div>
+          )}
+        </div>
+      )}
 
       {filteredRecipes.length === 0 ? (
         <div className="text-center py-20 text-neutral-500">
@@ -291,6 +312,8 @@ const DISH_IMAGES: [RegExp, string][] = [
 // Title wins over tags: a "desayuno" tag shouldn't turn an omelette into an oat bowl.
 // Leftovers are mostly homemade jars (powders, infused honey), closest to the spreads image.
 const dishSlug = (r: Recipe) => {
+  // The backend's AI category wins; keywords are the fallback for recipes not yet re-processed.
+  if (r.category && DISH_IMAGES.some(([, slug]) => slug === r.category)) return r.category;
   const find = (s: string) => DISH_IMAGES.find(([re]) => re.test(s.toLowerCase()))?.[1];
   return find(`${r.title} ${r.cuisine ?? ''}`) ?? find((r.categories ?? []).join(' ')) ?? 'untables';
 };
@@ -418,18 +441,8 @@ function RecipeDetail({ recipe, onClose, onEat, onToggleFavorite, onRate }: {
             </ul>
           )}
 
-          <div className="grid grid-cols-3 gap-2 mb-8">
-            {[
-              { label: 'Copy', icon: Copy, onClick: () => copyText(exportText()) },
-              { label: 'Share', icon: Share2, onClick: () => shareText(recipe.title, exportText()) },
-              { label: 'Print', icon: Printer, onClick: () => printText(recipe.title, exportText()) },
-            ].map(({ label, icon: Icon, onClick }) => (
-              <button key={label} onClick={onClick}
-                className="bg-neutral-900 border border-neutral-800 rounded-lg py-2 text-xs font-bold text-neutral-300 flex items-center justify-center gap-1.5 hover:border-orange-500 transition-colors">
-                <Icon className="w-3.5 h-3.5" aria-hidden="true" />
-                {label}
-              </button>
-            ))}
+          <div className="mb-8">
+            <ExportButtons title={recipe.title} getText={exportText} />
           </div>
 
           <div className="flex items-center justify-between mb-3">

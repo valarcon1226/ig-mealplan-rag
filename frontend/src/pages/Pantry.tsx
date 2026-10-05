@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useStore } from '../lib/store';
-import { Trash2, ShoppingCart, Archive, ListChecks, Plus, Loader2, Receipt, X, Copy, Share2, Printer } from 'lucide-react';
+import { Trash2, ShoppingCart, Archive, ListChecks, Plus, Loader2, Receipt, X } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { copyText, shareText, printText } from '../lib/shareText';
+import ExportButtons from '../lib/ExportButtons';
 
 export default function Pantry() {
   const { currentMealPlan } = useStore();
@@ -321,19 +321,7 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
       </div>
 
       {list.length > 0 && (
-        <div className="grid grid-cols-3 gap-2">
-          {[
-            { label: 'Copy', icon: Copy, onClick: () => copyText(exportText()) },
-            { label: 'Share', icon: Share2, onClick: () => shareText(title, exportText()) },
-            { label: 'Print', icon: Printer, onClick: () => printText(title, exportText()) },
-          ].map(({ label, icon: Icon, onClick }) => (
-            <button key={label} onClick={onClick}
-              className="bg-neutral-900 border border-neutral-800 rounded-lg py-2 text-xs font-bold text-neutral-300 flex items-center justify-center gap-1.5 hover:border-orange-500 transition-colors">
-              <Icon className="w-3.5 h-3.5" aria-hidden="true" />
-              {label}
-            </button>
-          ))}
-        </div>
+        <ExportButtons title={title} getText={exportText} />
       )}
 
       {list.length === 0 ? (

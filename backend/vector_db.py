@@ -22,7 +22,7 @@ def infer_dietary_restrictions(recipe: Dict[str, Any]) -> List[str]:
         nutricion.get("azucares_g"),
     )
 
-def load_recipes_data() -> List[Dict[str, Any]]:
+def load_recipes_data(media_ids: List[str] = None) -> List[Dict[str, Any]]:
     """
     Carga las recetas desde SQLite - la fuente real desde que run_recipe_pipeline
     persiste ahí (ver recipe_store.py). Antes esto leía recetas_saludables_backup.json
@@ -34,7 +34,10 @@ def load_recipes_data() -> List[Dict[str, Any]]:
 
     db = SessionLocal()
     try:
-        recipes = db.query(Recipe).filter(Recipe.nombre.isnot(None)).all()
+        query = db.query(Recipe).filter(Recipe.nombre.isnot(None))
+        if media_ids:
+            query = query.filter(Recipe.media_id.in_(media_ids))
+        recipes = query.all()
         recipes_list = []
         for r in recipes:
             try:
@@ -52,6 +55,7 @@ def load_recipes_data() -> List[Dict[str, Any]]:
                 "tags": [t.strip() for t in (r.tags or "").split(",") if t.strip()],
                 "cuisine_type": r.cuisine_type,
                 "dificultad": r.dificultad,
+                "category": r.category,
                 "ingredientes": ingredientes,
                 "instrucciones": instrucciones,
                 "tiempo_preparacion_min": r.tiempo_preparacion_min,
@@ -106,6 +110,10 @@ def populate_collection(collection, recipes: List[Dict[str, Any]]):
         tags = recipe.get("tags", [])
         if tags:
             text_parts.append(f"Etiquetas: {', '.join(tags)}")
+
+        category = recipe.get("category")
+        if category:
+            text_parts.append(f"Categoría: {category.replace('_', ' ')}")
 
         cuisine_type = recipe.get("cuisine_type")
         if cuisine_type:
@@ -165,6 +173,7 @@ def populate_collection(collection, recipes: List[Dict[str, Any]]):
             "tiempo": int(tiempo) if tiempo else 0,
             "tags": ", ".join(tags),
             "cuisine_type": cuisine_type or "",
+            "category": category or "",
             "dificultad": dificultad or "",
             "restricciones": ", ".join(restricciones),
             "ingredientes": ", ".join(ing_texts),
@@ -184,6 +193,13 @@ def populate_collection(collection, recipes: List[Dict[str, Any]]):
         ids=ids
     )
     print("Done!")
+
+def index_recipes(media_ids: List[str]):
+    """Vectoriza (upsert) solo estas recetas: se llama al guardar cada receta."""
+    recipes = load_recipes_data(media_ids)
+    if recipes:
+        populate_collection(get_or_create_collection(get_chroma_client()), recipes)
+
 
 def perform_similarity_search(collection, query: str, n_results: int = 5) -> List[Dict[str, Any]]:
     results = collection.query(

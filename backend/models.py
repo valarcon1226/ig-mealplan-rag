@@ -79,7 +79,12 @@ class Recipe(Base):
     ingredients_raw = Column(String, nullable=True) # JSON string of ingredients
     cuisine_type = Column(String, nullable=True) # ej. "italiana", "mexicana", "asiática"
     dificultad = Column(String, nullable=True) # "facil" | "media" | "dificil"
-    
+    category = Column(String, nullable=True) # categoría de contenido (ensaladas, postres...), ver CATEGORIAS en langchain_pipeline.py
+    # Lo que el modelo vio/escuchó en el video + caption, y el JSON que se armó con eso.
+    # Guardarlos permite re-procesar (reprocess_recipes.py) sin volver a Instagram.
+    raw_text = Column(String, nullable=True)
+    structured_json = Column(String, nullable=True)
+
     nutrition_id = Column(Integer, ForeignKey("nutrition_information.id"), nullable=True)
     nutrition = relationship("NutritionInformation", back_populates="recipe")
 
@@ -191,3 +196,7 @@ class PantryItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True, nullable=False)
     amount = Column(String, nullable=True)
+
+
+from database import ensure_columns
+ensure_columns("recipes", {"category": "VARCHAR", "raw_text": "TEXT", "structured_json": "TEXT"})

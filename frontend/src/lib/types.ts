@@ -27,6 +27,7 @@ export type Recipe = {
   media_id?: string; // id del post de IG; `id` es el id interno de SQLite
   diet?: string[]; // dietas que cumple (backend diet.py), ej. "Vegano", "Apto Diabético"
   cuisine?: string | null; // italiana, asiatica, mexicana, mediterranea...
+  category?: string | null; // categoría de contenido del backend (ensaladas, postres...): elige la imagen por defecto
   favorite?: boolean;
   rating?: number;      // 1-5 estrellas
   timesEaten?: number;  // veces registradas con "Add 1 Serving"

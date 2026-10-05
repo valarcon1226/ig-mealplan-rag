@@ -133,6 +133,15 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
       if (storedRecipes) setRecipes(normalizeRecipes(storedRecipes));
 
       const storedProfile = await get('app_profile');
+      // Older versions stored the Instagram password; keep only the username.
+      try { localStorage.removeItem('ig_password'); } catch { /* storage blocked */ }
+      if (storedProfile?.instagramApiKey) {
+        try {
+          const { username } = JSON.parse(storedProfile.instagramApiKey);
+          storedProfile.instagramApiKey = JSON.stringify({ username });
+          set('app_profile', storedProfile);
+        } catch { /* not JSON: leave as is */ }
+      }
       if (storedProfile) setProfile(storedProfile);
 
       const storedLog = await get('app_eat_log');

@@ -39,3 +39,4 @@ backend/servings_audit.csv
 # Local data backups made by backfill/migration scripts
 *.bak-*
 frontend_dev.log
+backend/ig_scrapp.db.bak-*

@@ -52,10 +52,25 @@ export default function Profile() {
     
     setIgLoading(true);
     try {
-      // BYPASS: Usar sesión local existente sin validar con el backend
+      // With a password, really log in so the backend renews its (possibly expired) session file.
+      // Without one, keep using the saved session as before.
+      if (igPassword) {
+        const res = await fetch('/api/ig/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: igUsername, password: igPassword }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setIgError(data.error || 'Instagram login failed');
+          return;
+        }
+        toast.success('Instagram session renewed');
+      }
       localStorage.setItem('ig_username', igUsername);
-      localStorage.setItem('ig_password', igPassword || 'dummy');
-      updateProfile({ instagramApiKey: JSON.stringify({ username: igUsername, password: igPassword || 'dummy' }) });
+      // Only the username is kept: the backend holds the Instagram session file, never the password.
+      setIgPassword('');
+      updateProfile({ instagramApiKey: JSON.stringify({ username: igUsername }) });
       await loadFromCloud(igUsername);
       setShowIgModal(false);
     } catch (e) {
@@ -105,7 +120,6 @@ export default function Profile() {
         method: 'GET',
         headers: { 
           'X-IG-Username': localStorage.getItem('ig_username') || igCreds.username || '',
-          'X-IG-Password': localStorage.getItem('ig_password') || igCreds.password || '',
           'ngrok-skip-browser-warning': 'true'
         }
       });

@@ -123,36 +123,26 @@ No calcules totales ni divisiones: solo los valores de cada ingrediente."""
 
 
 def _ask_llm(nombre: str, tags: List[str], ingredients: List[Dict[str, Any]], texto: str = "",
-             api_key: str = "", max_retries: int = 4) -> RecipeNutrition:
-    from langchain_google_genai import ChatGoogleGenerativeAI
+             api_key: str = "") -> RecipeNutrition:
     from langchain_core.messages import HumanMessage, SystemMessage
     from langchain_pipeline import get_env_var
 
     api_key = api_key or get_env_var("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("Falta GEMINI_API_KEY.")
-    llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", google_api_key=api_key, temperature=0)
     lines = "\n".join(f"- {i.get('nombre')}: {i.get('cantidad') or '?'} {i.get('unidad') or ''}".rstrip()
                       for i in ingredients)
     human = f"Receta: {nombre}\nTags: {', '.join(tags or [])}\nIngredientes:\n{lines}"
     if texto:
         human += f"\n\nTexto original:\n{texto[:4000]}"
 
-    wait = 15
-    for attempt in range(max_retries):
-        try:
-            result = llm.with_structured_output(RecipeNutrition).invoke(
-                [SystemMessage(content=NUTRITION_PROMPT), HumanMessage(content=human)])
-            if result is None or not result.ingredientes:
-                raise ValueError("El LLM no devolvió valores por ingrediente.")
-            return result
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                if attempt < max_retries - 1:
-                    time.sleep(wait)
-                    wait *= 2
-                    continue
-            raise
+    # Calidad primero (modelos flash), rotando entre los que tengan cupo: ver llm_chain.py.
+    from llm_chain import invoke_structured
+    result = invoke_structured([SystemMessage(content=NUTRITION_PROMPT), HumanMessage(content=human)],
+                               RecipeNutrition, lite=False)
+    if not result.ingredientes:
+        raise ValueError("El LLM no devolvió valores por ingrediente.")
+    return result
 
 
 def calculate(nombre: str, tags: List[str], ingredients: List[Dict[str, Any]],

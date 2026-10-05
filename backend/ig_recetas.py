@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Literal
 from instagrapi.exceptions import LoginRequired, ChallengeRequired
 
-from ig_auth import get_client_for_user
+from ig_auth import get_client_for_user, relogin
 from ig_media import resolve_media, download_media, download_bytes, MediaResolutionError, MediaDownloadError
 
 # LangChain pipeline (import opcional — solo falla si no está instalado)
@@ -136,7 +136,11 @@ def login_endpoint(
     if x_ig_username == "test" and x_ig_password == "test":
         return {"status": "success", "message": "Sesión iniciada correctamente para test"}
         
-    user_cl = get_client_for_user(x_ig_username, x_ig_password)
+    # Con contraseña siempre se hace login nuevo: el archivo de sesión guardado puede estar vencido.
+    if x_ig_username and x_ig_password:
+        relogin(x_ig_username, x_ig_password)
+    else:
+        get_client_for_user(x_ig_username, x_ig_password)
     return {"status": "success", "message": f"Sesión iniciada correctamente para {x_ig_username or os.environ.get('IG_USERNAME')}"}
 
 
@@ -909,6 +913,7 @@ def get_all_recipes():
             "thumbnail_url": r.thumbnail_url,
             "servings": r.servings,
             "cuisine": r.cuisine_type,
+            "category": r.category,
             "categories": r.tags.split(",") if r.tags else [],
             "instructions": instructions,
             "ingredients": ing_mapped,

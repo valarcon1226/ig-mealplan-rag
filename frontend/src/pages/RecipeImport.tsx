@@ -70,7 +70,6 @@ export default function RecipeImport() {
         method: 'GET',
         headers: { 
           'X-IG-Username': localStorage.getItem('ig_username') || igCreds.username || '',
-          'X-IG-Password': localStorage.getItem('ig_password') || igCreds.password || '',
           'ngrok-skip-browser-warning': 'true'
         }
       });
@@ -114,7 +113,6 @@ export default function RecipeImport() {
         method: 'GET',
         headers: { 
           'X-IG-Username': localStorage.getItem('ig_username') || igCreds.username || '',
-          'X-IG-Password': localStorage.getItem('ig_password') || igCreds.password || '',
           'ngrok-skip-browser-warning': 'true'
         }
       });
@@ -162,8 +160,7 @@ export default function RecipeImport() {
            media_id: item.id || item.media_id || item.pk,
            gemini_api_key: "",
            target_servings: 0,
-           x_ig_username: localStorage.getItem('ig_username') || "",
-           x_ig_password: localStorage.getItem('ig_password') || ""
+           x_ig_username: localStorage.getItem('ig_username') || ""
          })
        });
        

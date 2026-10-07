@@ -5,6 +5,5 @@ langchain>=0.3.0
 langchain-google-genai>=2.0.0
 langchain-core>=0.3.0
 pydantic>=2.0.0
-instagrapi>=3.0.19  # versiones viejas: "Your version of Instagram is out of date"
 langchain-groq
 langchain-openai

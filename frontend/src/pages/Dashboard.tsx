@@ -3,7 +3,7 @@ import { Flame, Target, Utensils, Activity, HeartPulse, CalendarCheck, Check } f
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
-import { planDays, todayPlanIndex, planIdOf, dayEntries, useRealScore, mealMacros } from '../lib/plan';
+import { planDays, todayPlanIndex, planIdOf, dayEntries, realScore, mealMacros } from '../lib/plan';
 import { getPregnancyWeeks } from '../lib/macroCalculator';
 import toast from 'react-hot-toast';
 
@@ -85,9 +85,17 @@ export default function Dashboard() {
         fat: t.grasas ?? pg.fat, fiber: t.fibra ?? pg.fiber, sugar: t.azucares ?? pg.sugar }
     : pg;
   const todaysLog = eatLog.filter(e => e.date === format(new Date(), 'yyyy-MM-dd'));
-  const realScore = useRealScore(todaysLog, t, profile);
+  // Score of what was actually eaten today, against today's plan targets (or the profile goals).
   const planId = planIdOf(currentMealPlan);
-  const doneKeys = new Set(dayEntries(eatLog, planId, dayIndex).map(e => e.planKey));
+  const planEntries = dayEntries(eatLog, planId, dayIndex);
+  const doneKeys = new Set(planEntries.map(e => e.planKey));
+  // With a plan, the score is how much of it was followed: share of its meals checked (a Cookbook
+  // replacement counts; "ate something else" doesn't). All checked = 100 even if the plan itself
+  // doesn't reach the daily goal. Without a plan: today's intake against the profile goals.
+  const score = today?.meals.length
+    ? Math.round((planEntries.filter(e => e.macros).length / today.meals.length) * 100)
+    : realScore(todaysLog, { calorias: pg.calories, proteinas: pg.protein, carbohidratos: pg.carbs,
+        grasas: pg.fat, fibra: pg.fiber, azucares: pg.sugar }, profile);
 
   const macros = dailyConsumption.macros;
   const consumedCalories = Math.round(macros.calories);
@@ -176,18 +184,14 @@ export default function Dashboard() {
             <Link to="/planner" className="text-xs text-orange-400 hover:text-orange-300">Abrir plan →</Link>
           </div>
 
-          <div className="grid grid-cols-3 gap-4 mb-4 text-center">
+          <div className="grid grid-cols-2 gap-4 mb-4 text-center">
             <div>
               <div className={`text-2xl font-bold ${doneKeys.size === today.meals.length ? 'text-green-400' : 'text-white'}`}>{doneKeys.size}/{today.meals.length}</div>
               <div className="text-xs text-neutral-500 uppercase tracking-widest mt-1">Comidas</div>
             </div>
             <div>
-              <div className="text-2xl font-bold text-green-400">{realScore ?? '—'}</div>
+              <div className="text-2xl font-bold text-green-400">{score ?? '—'}</div>
               <div className="text-xs text-neutral-500 uppercase tracking-widest mt-1">Puntaje real</div>
-            </div>
-            <div>
-              <div className="text-2xl font-bold text-orange-500">{Math.round(today.score)}</div>
-              <div className="text-xs text-neutral-500 uppercase tracking-widest mt-1">Planeado</div>
             </div>
           </div>
 

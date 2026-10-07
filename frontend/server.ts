@@ -73,122 +73,6 @@ async function startServer() {
 
   // --- Instagram API Routes ---
 
-  app.post("/api/ig/proxy", async (req, res) => {
-    try {
-      const { url } = req.body;
-      if (!url) return res.status(400).json({ error: "Missing url" });
-      
-      const fetchUrl = url.endsWith('/collections') ? url : url.replace(/\/$/, '') + '/collections';
-      
-      const ngrokRes = await fetch(fetchUrl, {
-         method: 'GET',
-         headers: { 'ngrok-skip-browser-warning': 'true' }
-      });
-      
-      const data = await ngrokRes.json();
-      res.json(data);
-    } catch (e: any) {
-      console.error("Ngrok Proxy Error:", e);
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post("/api/ig/login", async (req, res) => {
-    try {
-      const vpsUrl = BACKEND_URL;
-      const { username, password } = req.body;
-      const response = await fetch(`${vpsUrl}/login`, {
-        method: "POST",
-        headers: {
-          "X-IG-Username": username,
-          "X-IG-Password": password,
-          "ngrok-skip-browser-warning": "true"
-        }
-      });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        let errMsg = errorData.detail || "Could not authenticate with backend.";
-        if (typeof errMsg === 'string' && (errMsg.toLowerCase().includes('challenge') || errMsg.toLowerCase().includes('requerida'))) {
-          errMsg = "Instagram requires verification or the credentials are incorrect. Please check them.";
-        }
-        return res.status(401).json({ error: errMsg });
-      }
-      
-      res.json({ session: username });
-    } catch (error: any) {
-      console.error("VPS connection test error:", error);
-      res.status(500).json({ error: "Failed to connect to backend server. Please try again later." });
-    }
-  });
-
-  app.post("/api/ig/collections", async (req, res) => {
-    try {
-      const { username, password } = req.body;
-      const vpsUrl = BACKEND_URL;
-      const response = await fetch(`${vpsUrl}/collections`, {
-        method: "GET",
-        headers: {
-          "X-IG-Username": username,
-          "X-IG-Password": password,
-          "ngrok-skip-browser-warning": "true"
-        }
-      });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || "Failed to reach FastAPI server on VPS.");
-      }
-      const data = await response.json();
-      return res.json({ collections: data.collections || data });
-    } catch (error: any) {
-      console.error("IG Collections Error:", error);
-      res.status(500).json({ error: "Failed to fetch collections: " + error.message });
-    }
-  });
-
-  app.post("/api/ig/scrape-collection", async (req, res) => {
-    try {
-      const { folderId, username, password } = req.body;
-      const vpsUrl = BACKEND_URL;
-      
-      const url = folderId 
-          ? `${vpsUrl}/collection-posts/all?collection_id=${folderId}&since=0`
-          : `${vpsUrl}/saved-posts?limit=20`;
-          
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          "X-IG-Username": username,
-          "X-IG-Password": password,
-          "ngrok-skip-browser-warning": "true"
-        }
-      });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || "Failed to reach FastAPI server on VPS.");
-      }
-      const data = await response.json();
-      
-      let posts = Array.isArray(data) ? data : (data.posts || data.items || []);
-      
-      // Map from FastAPI custom format
-      const scraped = posts.map((item: any) => {
-        const post = item.media || item;
-        return {
-          id: post.id || post.pk || crypto.randomUUID(),
-          caption: post.caption?.text || post.caption || "",
-          imageUrl: post.image_versions2?.candidates?.[0]?.url || post.thumbnail_url || "",
-          videoUrl: post.video_versions?.[0]?.url || post.video_url || "",
-        };
-      });
-      return res.json({ items: scraped });
-    } catch (error: any) {
-      console.error("IG Scrape Error:", error);
-      res.status(500).json({ error: "Failed to scrape collection: " + error.message });
-    }
-  });
-
-  // --- API Routes ---
-
   app.get("/api/recipes", async (req, res) => {
     try {
       const vpsUrl = BACKEND_URL;
@@ -224,6 +108,29 @@ async function startServer() {
     }
   });
 
+  // Bulk import of saved posts from Instagram's official data export (no account login).
+  app.post("/api/import/instagram-export", async (req, res) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/import/instagram-export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        body: JSON.stringify(req.body)
+      });
+      res.status(response.status).json(await response.json());
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to import export: " + error.message });
+    }
+  });
+
+  app.get("/api/import/saved", async (_req, res) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/import/saved`, { headers: { "ngrok-skip-browser-warning": "true" } });
+      res.status(response.status).json(await response.json());
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to load saved imports: " + error.message });
+    }
+  });
+
   app.post("/api/mealplan/from-pantry", async (req, res) => {
     try {
       const response = await fetch(`${BACKEND_URL}/api/mealplan/from-pantry`, {
@@ -234,19 +141,6 @@ async function startServer() {
       res.status(response.status).json(await response.json());
     } catch (error: any) {
       res.status(500).json({ error: "Failed to plan from pantry: " + error.message });
-    }
-  });
-
-  app.post("/api/intake-score", async (req, res) => {
-    try {
-      const response = await fetch(`${BACKEND_URL}/api/intake-score`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
-        body: JSON.stringify(req.body)
-      });
-      res.status(response.status).json(await response.json());
-    } catch (error: any) {
-      res.status(500).json({ error: "Failed to score intake: " + error.message });
     }
   });
 
@@ -286,35 +180,6 @@ async function startServer() {
     } catch (error: any) {
       console.error("Mealprep Error:", error);
       res.status(500).json({ error: "Failed to generate mealprep: " + error.message });
-    }
-  });
-
-  app.post("/api/analyze-langchain-by-id", async (req, res) => {
-    try {
-      const vpsUrl = BACKEND_URL;
-      const bodyParams = { ...req.body };
-      // Fallback for post_id logic just in case
-      if (bodyParams.post_id && !bodyParams.media_id) {
-        bodyParams.media_id = bodyParams.post_id;
-      }
-      
-      const response = await fetch(`${vpsUrl}/analyze-langchain-by-id`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "ngrok-skip-browser-warning": "true"
-        },
-        body: JSON.stringify(bodyParams)
-      });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || errorData.error || "Failed to reach FastAPI server on VPS.");
-      }
-      const data = await response.json();
-      return res.json(data);
-    } catch (error: any) {
-      console.error("IG Analyze Error:", error);
-      res.status(500).json({ error: "Failed to analyze post: " + error.message });
     }
   });
 
@@ -553,10 +418,6 @@ async function startServer() {
       'ngrok-skip-browser-warning': 'true',
       'Content-Type': 'application/json',
     };
-
-    // Pasar headers de Instagram si vienen del frontend
-    if (req.headers['x-ig-username']) headers['X-IG-Username'] = req.headers['x-ig-username'] as string;
-    if (req.headers['x-ig-password']) headers['X-IG-Password'] = req.headers['x-ig-password'] as string;
 
     const fetchOptions: any = {
       method: req.method,

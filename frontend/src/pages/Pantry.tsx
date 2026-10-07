@@ -207,12 +207,28 @@ function PantryInventory() {
           <p className="text-sm">Empieza agregando lo que tienes en casa arriba (ej. "1 kg de arroz") o sube la boleta de tu última compra.</p>
         </div>
       ) : (
+        <>
+        {/* The API returns items soonest-to-expire first. */}
+        {items.some(i => i.days_left <= 3) && (
+          <div role="status" className="bg-red-500/10 border border-red-500/30 text-red-200 rounded-xl p-3 text-sm">
+            <span className="font-bold">Usar pronto: </span>
+            {items.filter(i => i.days_left <= 3).map(i => `${i.name} (${expiryLabel(i.days_left)})`).join(', ')}.
+            <span className="text-red-300/80"> El plan desde la despensa los usa primero.</span>
+          </div>
+        )}
         <ul className="space-y-2">
           {items.map(item => (
             <li key={item.id} className="flex items-center justify-between bg-neutral-900 border border-neutral-800 p-3 rounded-xl">
               <div>
                 <div className="font-bold text-sm text-white">{item.name}</div>
-                {item.amount && <div className="text-xs text-neutral-500">{item.amount}</div>}
+                <div className="text-xs text-neutral-500 flex gap-2 items-center">
+                  {item.amount && <span>{item.amount}</span>}
+                  {item.days_left != null && item.days_left <= 30 && (
+                    <span className={`px-1.5 py-0.5 rounded font-bold ${item.days_left <= 2 ? 'bg-red-500/15 text-red-400' : item.days_left <= 5 ? 'bg-yellow-500/15 text-yellow-400' : 'text-neutral-400'}`}>
+                      {expiryLabel(item.days_left)}
+                    </span>
+                  )}
+                </div>
               </div>
               <button onClick={() => handleDelete(item.id)} aria-label={`Delete ${item.name}`} className="p-2 text-neutral-600 hover:text-red-500 transition-colors">
                 <Trash2 className="w-4 h-4" />
@@ -220,6 +236,7 @@ function PantryInventory() {
             </li>
           ))}
         </ul>
+        </>
       )}
     </div>
   );
@@ -375,4 +392,12 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
       )}
     </div>
   );
+}
+
+// "vence hoy", "vence en 2 días", "vencido": days_left comes from the backend (shelf_life.py).
+function expiryLabel(days: number): string {
+  if (days < 0) return 'vencido';
+  if (days === 0) return 'vence hoy';
+  if (days === 1) return 'vence mañana';
+  return `vence en ${days} días`;
 }

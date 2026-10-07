@@ -9,7 +9,11 @@ import 'react-datepicker/dist/react-datepicker.css';
 import toast from 'react-hot-toast';
 
 export default function Profile() {
-  const { profile, updateProfile, loadFromCloud } = useStore();
+  const { profile, updateProfile, loadFromCloud, dailyConsumption } = useStore();
+  // Same green -> red scale as the Dashboard sugar bar: nothing eaten = green, at/over the max = red.
+  const sugarToday = dailyConsumption.macros.sugar;
+  const sugarRatio = profile.dailyGoals.sugar > 0 ? Math.min(sugarToday / profile.dailyGoals.sugar, 1) : 0;
+  const sugarColor = `hsl(${Math.round(120 * (1 - sugarRatio))}, 75%, 50%)`;
   const [loading, setLoading] = useState(false);
   const [showStaticDataModal, setShowStaticDataModal] = useState(false);
   const [macroSuccess, setMacroSuccess] = useState(false);
@@ -18,10 +22,7 @@ export default function Profile() {
   const [n8n, setN8n] = useState(profile.n8nWebhookUrl || '');
   const [showIgModal, setShowIgModal] = useState(false);
   const [showIgConnectionModal, setShowIgConnectionModal] = useState(false);
-  const [igFolders, setIgFolders] = useState<any[]>([]);
-  const [igFoldersLoading, setIgFoldersLoading] = useState(false);
   const [igUsername, setIgUsername] = useState('');
-  const [igPassword, setIgPassword] = useState('');
   const [igLoading, setIgLoading] = useState(false);
   const [igError, setIgError] = useState('');
   
@@ -42,39 +43,23 @@ export default function Profile() {
     toast.success("Saved");
   }
 
+  // App username: only identifies your synced data on the backend (loadFromCloud).
+  // It no longer logs into Instagram: that got the account flagged.
   const handleIgLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIgError('');
-    if (!igUsername) {
-      setIgError("Please enter your username");
+    const username = igUsername.trim();
+    if (!username) {
+      setIgError('Escribe un nombre de usuario');
       return;
     }
-    
     setIgLoading(true);
     try {
-      // With a password, really log in so the backend renews its (possibly expired) session file.
-      // Without one, keep using the saved session as before.
-      if (igPassword) {
-        const res = await fetch('/api/ig/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: igUsername, password: igPassword }),
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          setIgError(data.error || 'Instagram login failed');
-          return;
-        }
-        toast.success('Instagram session renewed');
-      }
-      localStorage.setItem('ig_username', igUsername);
-      // Only the username is kept: the backend holds the Instagram session file, never the password.
-      setIgPassword('');
-      updateProfile({ instagramApiKey: JSON.stringify({ username: igUsername }) });
-      await loadFromCloud(igUsername);
+      updateProfile({ instagramApiKey: JSON.stringify({ username }) });
+      await loadFromCloud(username);
       setShowIgModal(false);
-    } catch (e) {
-       setIgError("Network error. Please try again later.");
+    } catch {
+      setIgError('No se pudo conectar con el servidor. Intenta de nuevo.');
     } finally {
       setIgLoading(false);
     }
@@ -110,40 +95,6 @@ export default function Profile() {
     }
   };
 
-  const handleFetchFolders = async () => {
-    if (!profile.instagramApiKey) return;
-    setIgFoldersLoading(true);
-    setIgFolders([]);
-    try {
-      const igCreds = JSON.parse(profile.instagramApiKey || '{}');
-      const res = await fetch('/api/collections', { 
-        method: 'GET',
-        headers: { 
-          'X-IG-Username': localStorage.getItem('ig_username') || igCreds.username || '',
-          'ngrok-skip-browser-warning': 'true'
-        }
-      });
-      const data = await res.json();
-      let fetchedFolders: any[] = [];
-      if (Array.isArray(data)) {
-        fetchedFolders = data;
-      } else if (data.collections) {
-         fetchedFolders = data.collections;
-      } else if (data.folders) {
-         fetchedFolders = data.folders;
-      } else {
-         throw new Error(data.error || "Webhook did not return correctly.");
-      }
-      setIgFolders(fetchedFolders);
-      updateProfile({ igFolders: fetchedFolders });
-      toast.success("Folders synced!");
-    } catch (err: any) {
-      toast.error(err.message || 'Error fetching folders.');
-    } finally {
-      setIgFoldersLoading(false);
-    }
-  };
-
   const igUserLabel = (() => {
     try {
        const keyData = JSON.parse(profile.instagramApiKey || '{}');
@@ -173,14 +124,14 @@ export default function Profile() {
                 onClick={() => setShowIgModal(true)}
                 className="bg-gradient-to-tr from-pink-500 via-red-500 to-orange-500 text-white text-xs font-bold px-4 py-2 rounded-xl shadow-lg hover:opacity-90 transition-opacity"
               >
-                Connect IG
+                Iniciar sesión
               </button>
             ) : (
               <button 
                 onClick={() => setShowIgConnectionModal(true)}
                 className="bg-green-500/10 hover:bg-green-500/20 text-green-400 border border-green-500/20 text-xs font-bold px-4 py-2 rounded-xl transition-colors cursor-pointer"
               >
-                IG Connected
+                {igUserLabel}
               </button>
             )}
           </div>
@@ -192,7 +143,8 @@ export default function Profile() {
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
           <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl w-full max-w-sm shadow-2xl relative overflow-hidden">
             <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-pink-500 via-red-500 to-orange-500"></div>
-            <h3 className="text-xl font-bold mb-4 text-white mt-2">Instagram Login</h3>
+            <h3 className="text-xl font-bold mb-1 text-white mt-2">Tu usuario en la app</h3>
+            <p className="text-xs text-neutral-500 mb-4">Solo identifica tus datos guardados en el servidor. La app no se conecta a tu Instagram.</p>
             
             <form onSubmit={handleIgLogin} className="space-y-4">
               {igError && (
@@ -204,23 +156,14 @@ export default function Profile() {
                 type="text" 
                 value={igUsername}
                 onChange={e => setIgUsername(e.target.value)}
-                placeholder="Username" 
+                placeholder="Usuario" aria-label="Usuario de la app" 
                 className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-sm outline-none text-white focus:border-pink-500 transition-colors"
                 required
               />
-              <input 
-                type="password" 
-                value={igPassword}
-                onChange={e => setIgPassword(e.target.value)}
-                placeholder="Password" 
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-sm outline-none text-white focus:border-pink-500 transition-colors"
-                required
-              />
-              
               <div className="flex gap-2 pt-4">
                 <button type="button" onClick={() => setShowIgModal(false)} className="flex-1 py-3 bg-neutral-800 hover:bg-neutral-700 rounded-xl text-white text-sm font-bold transition-colors">Cancel</button>
                 <button type="submit" disabled={igLoading} className="flex-1 bg-gradient-to-r from-pink-500 to-orange-500 hover:opacity-90 rounded-xl text-white text-sm font-bold transition-opacity">
-                  {igLoading ? "Connecting..." : "Login"}
+                  {igLoading ? "Cargando..." : "Entrar"}
                 </button>
               </div>
             </form>
@@ -244,49 +187,21 @@ export default function Profile() {
               <h3 className="text-xl font-bold text-white">{igUserLabel}</h3>
               <p className="text-sm text-neutral-400 flex items-center gap-1 mt-1">
                 <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                Connected
+                Datos sincronizados
               </p>
             </div>
 
             <div className="space-y-3">
-                <div className="bg-neutral-950 p-4 rounded-xl border border-neutral-800">
-                  <div className="flex justify-between items-center mb-2">
-                    <p className="text-xs font-bold text-neutral-400 uppercase tracking-wider">Your Folders</p>
-                    <button onClick={handleFetchFolders} className="text-xs text-orange-500 font-bold hover:text-orange-400 transition-colors bg-orange-500/10 px-2 py-1 rounded">
-                      {igFoldersLoading ? "Syncing..." : "Sync Folders"}
-                    </button>
-                  </div>
-                  {igFoldersLoading ? (
-                    <div className="flex justify-center py-4">
-                      <RefreshCw className="w-5 h-5 text-neutral-500 animate-spin" />
-                    </div>
-                  ) : igFolders.length > 0 ? (
-                    <ul className="text-sm text-white space-y-2 mt-3 max-h-40 overflow-y-auto pr-2 custom-scrollbar">
-                      {igFolders.map((f, i) => (
-                        <li key={i} className="flex items-center justify-between p-2 rounded-lg bg-neutral-900/50 border border-neutral-800/50">
-                          <span className="font-medium truncate">{typeof f === 'string' ? f : f.name || f.id}</span>
-                          {f.media_count !== undefined && (
-                            <span className="text-[10px] bg-neutral-800 px-2 py-1 rounded-md text-neutral-400 font-bold">{f.media_count}</span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-xs text-neutral-500 italic mt-2 py-2 text-center bg-neutral-900/30 rounded-lg">Click sync to fetch folders.</p>
-                  )}
-                </div>
-              
               <div className="flex gap-2 pt-2">
                 <button type="button" onClick={() => setShowIgConnectionModal(false)} className="flex-1 py-3 text-white text-sm font-bold bg-neutral-800 rounded-xl hover:bg-neutral-700 transition-colors">Done</button>
                 <button 
                   onClick={() => {
                     updateProfile({ instagramApiKey: undefined, igSyncWebhookUrl: undefined, igFolders: undefined });
                     setShowIgConnectionModal(false);
-                    setIgFolders([]);
                   }} 
                   className="flex-1 bg-red-500/10 text-red-500 text-sm border border-red-500/20 font-bold rounded-xl py-3 hover:bg-red-500/20 transition-colors"
                 >
-                  Logout
+                  Cerrar sesión
                 </button>
               </div>
             </div>
@@ -343,7 +258,7 @@ export default function Profile() {
               <h3 className="text-xl font-bold text-white">{profile.garminCredentials?.displayName || profile.garminCredentials?.user || 'Garmin User'}</h3>
               <p className="text-sm text-neutral-400 flex items-center gap-1 mt-1">
                 <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
-                Connected
+                Datos sincronizados
               </p>
             </div>
 
@@ -357,7 +272,7 @@ export default function Profile() {
                   }} 
                   className="flex-1 bg-red-500/10 text-red-500 text-sm border border-red-500/20 font-bold rounded-xl py-3 hover:bg-red-500/20 transition-colors"
                 >
-                  Logout
+                  Cerrar sesión
                 </button>
               </div>
             </div>
@@ -400,13 +315,30 @@ export default function Profile() {
 
         <div className="bg-neutral-950 p-4 rounded-xl border border-neutral-800 shadow-inner">
           <p className="text-xs text-neutral-500 uppercase tracking-wider mb-3 text-center">Calculated Daily Intake</p>
-          <div className="grid grid-cols-3 gap-x-2 gap-y-4 text-center">
-             <div><div className="text-orange-500 font-bold text-xl">{profile.dailyGoals.calories}</div><div className="text-[10px] text-neutral-500 mt-1">KCAL</div></div>
-             <div><div className="text-white font-bold text-xl">{profile.dailyGoals.protein}g</div><div className="text-[10px] text-neutral-500 mt-1">PRO</div></div>
-             <div><div className="text-white font-bold text-xl">{profile.dailyGoals.carbs}g</div><div className="text-[10px] text-neutral-500 mt-1">CARB</div></div>
-             <div><div className="text-white font-bold text-xl">{profile.dailyGoals.fat}g</div><div className="text-[10px] text-neutral-500 mt-1">FAT</div></div>
-             <div><div className="text-green-400 font-bold text-xl">{profile.dailyGoals.fiber}g</div><div className="text-[10px] text-neutral-500 mt-1">FIBRA (MÍN)</div></div>
-             <div><div className="text-pink-400 font-bold text-xl">{profile.dailyGoals.sugar}g</div><div className="text-[10px] text-neutral-500 mt-1">AZÚCAR (MÁX)</div></div>
+          {/* Calories big on the left; macros in a 3+2 grid. Sugar is the only live value: today's
+              intake against the max, green (none yet) -> red (at or over the max). */}
+          <div className="flex gap-2 text-center">
+            <div className="w-1/3 shrink-0 p-3 flex flex-col items-center justify-center">
+              <div className="text-3xl font-bold text-orange-500 leading-none">{Math.round(profile.dailyGoals.calories)}</div>
+              <div className="text-[10px] text-neutral-500 mt-1">KCAL</div>
+            </div>
+            <div className="flex-1 grid grid-cols-6 gap-2">
+              {([['protein', 'PRO'], ['carbs', 'CARB'], ['fat', 'FAT']] as const).map(([k, label]) => (
+                <div key={k} className="col-span-2 p-2">
+                  <div className="text-white font-bold text-lg">{Math.round(profile.dailyGoals[k])}g</div>
+                  <div className="text-[10px] text-neutral-500">{label}</div>
+                </div>
+              ))}
+              <div className="col-span-3 p-2">
+                <div className="text-white font-bold text-lg">{Math.round(profile.dailyGoals.fiber)}g</div>
+                <div className="text-[10px] text-neutral-500">FIBRA (MÍN)</div>
+              </div>
+              <div className="col-span-3 p-2">
+                {/* The target; its color shows how much of it today's meals already used. */}
+                <div className="font-bold text-lg" style={{ color: sugarColor }}>{Math.round(profile.dailyGoals.sugar)}g</div>
+                <div className="text-[10px] text-neutral-500">AZÚCAR</div>
+              </div>
+            </div>
           </div>
         </div>
       </section>

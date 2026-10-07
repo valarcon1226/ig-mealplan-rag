@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react';
 import { differenceInCalendarDays } from 'date-fns';
 import { buildPlanFingerprint } from './mealprepStorage';
 import { EatEntry, Macros, UserProfile } from './types';
@@ -31,33 +30,34 @@ export const mealMacros = (meal: any): Macros => ({
 export const dayEntries = (eatLog: EatEntry[], planId: string, dayIndex: number) =>
   eatLog.filter(e => e.planKey?.startsWith(`${planId}:${dayIndex}:`));
 
-// Real score: the backend's own formula (same as the planned score) over what was eaten.
-// "Ate something else" entries have no macros, so they add no points.
-export function useRealScore(entries: EatEntry[], targets: any, profile: UserProfile): number | null {
-  const [score, setScore] = useState<number | null>(null);
-  const totals = sumMacros(entries);
-  const hasMacros = entries.some(e => e.macros);
-  const key = JSON.stringify([totals, targets]);
-  useEffect(() => {
-    if (!targets || !hasMacros) { setScore(null); return; }
-    let cancelled = false;
-    fetch('/api/intake-score', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        totals: {
-          calorias: totals.calories, proteinas: totals.protein, carbohidratos: totals.carbs,
-          grasas: totals.fat, fibra: totals.fiber, azucar: totals.sugar,
-        },
-        targets,
-        goal: profile.goal ?? 'maintain',
-        is_pregnant: !!profile.isPregnant,
-      }),
-    })
-      .then(r => (r.ok ? r.json() : null))
-      .then(d => { if (!cancelled) setScore(d ? d.total : null); })
-      .catch(() => { if (!cancelled) setScore(null); });
-    return () => { cancelled = true; };
-  }, [key, hasMacros]);
-  return score;
+// Real score of what was eaten: same formula as the backend's planned score (rag_planner.intake_score),
+// computed here so it shows instantly and without the server. Keep both in sync if the formula changes.
+const SCORE_POINTS = { calorias: 45, proteinas: 20, carbohidratos: 15, grasas: 10, fibra: 5, azucar: 5 };
+// (start of full score, end of full score, 0 points below, 0 points above) as a fraction of the target
+const GOAL_BANDS: Record<string, [number, number, number, number]> = {
+  lose: [0.8, 1.0, 0.6, 1.2], gain: [0.9, 1.1, 0.7, 1.3], maintain: [0.95, 1.05, 0.75, 1.25],
+};
+
+function band(value: number, target: number | null | undefined, lo: number, hi: number, zeroLo: number, zeroHi: number) {
+  if (!target) return 1;
+  const r = value / target;
+  if (r < lo) return Math.max(0, (r - zeroLo) / (lo - zeroLo));
+  if (r > hi) return Math.max(0, (zeroHi - r) / (zeroHi - hi));
+  return 1;
+}
+
+export function realScore(entries: EatEntry[], targets: any, profile: UserProfile): number | null {
+  if (!targets || !entries.some(e => e.macros)) return null; // "ate something else" adds no points
+  const t = sumMacros(entries);
+  const b = GOAL_BANDS[profile.isPregnant ? 'maintain' : profile.goal ?? 'maintain'] ?? GOAL_BANDS.maintain;
+  const fractions = {
+    calorias: band(t.calories, targets.calorias, ...b),
+    carbohidratos: band(t.carbs, targets.carbohidratos, ...b),
+    grasas: band(t.fat, targets.grasas, ...b),
+    proteinas: band(t.protein, targets.proteinas, 1.0, 1.3, 0, 2.3),
+    fibra: band(t.fiber, targets.fibra, 1.0, Infinity, 0, Infinity),
+    azucar: band(t.sugar, targets.azucares, 0, 1.0, -1, 1.5),
+  };
+  return Math.round(Object.entries(fractions).reduce(
+    (sum, [k, f]) => sum + Math.round(SCORE_POINTS[k as keyof typeof SCORE_POINTS] * f * 10) / 10, 0));
 }

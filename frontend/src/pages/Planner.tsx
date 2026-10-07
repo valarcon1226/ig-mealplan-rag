@@ -4,6 +4,9 @@ import { useStore } from '../lib/store';
 import { planIdOf, mealMacros, dayEntries, todayPlanIndex } from '../lib/plan';
 import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, ChevronLeft, ChevronRight, ChefHat, Check, RefreshCw, Utensils } from 'lucide-react';
 import { Recipe } from '../lib/types';
+import { addDays, differenceInCalendarDays, format } from 'date-fns';
+import { es } from 'date-fns/locale';
+import RecipeImage from '../lib/RecipeImage';
 
 export default function Planner() {
   const { profile, recipes, setCurrentMealPlan, currentMealPlan, eatLog, logMeal, unlogMeal, planStart } = useStore();
@@ -14,6 +17,8 @@ export default function Planner() {
   const [numDays, setNumDays] = useState(1);
   const [fromPantry, setFromPantry] = useState(false);
   const [planNote, setPlanNote] = useState<string | null>(null);
+  // Both buttons open the same modal; the pantry one comes with "use only my pantry" checked.
+  const openGenerate = (pantry: boolean) => { setFromPantry(pantry); setShowModal(true); };
   // Opens on today's plan day.
   const [currentDayIndex, setCurrentDayIndex] = useState(() => todayPlanIndex(currentMealPlan, planStart));
 
@@ -102,16 +107,19 @@ export default function Planner() {
 
   const openRecipeDetails = (meal: any, key: string) => {
     setSelectedKey(key);
+    // The Cookbook copy has the current photo and category (the plan keeps what it had when generated).
+    const saved = recipes.find(r => r.id === String(meal.recipe_id));
     const recipeToOpen: Recipe = {
       id: String(meal.recipe_id),
       title: meal.nombre,
-      thumbnail_url: meal.thumbnail_url,
+      thumbnail_url: saved?.thumbnail_url || meal.thumbnail_url,
+      category: saved?.category,
       video_url: meal.video_url,
       ingredients: meal.ingredients || [],
       instructions: meal.instructions || [],
       macros: mealMacros(meal),
       servings: 1,
-      categories: [],
+      categories: saved?.categories ?? [],
       createdAt: Date.now()
     };
     setSelectedRecipe(recipeToOpen);
@@ -230,11 +238,18 @@ export default function Planner() {
           <h2 className="font-bold text-xl mb-2">Ready for the day?</h2>
           <p className="text-sm text-neutral-400 mb-6 pb-6 border-b border-neutral-800">Use your saved recipes to build a balanced, goal-oriented meal plan.</p>
           <button
-            onClick={() => setShowModal(true)}
+            onClick={() => openGenerate(false)}
             disabled={loading}
             className="w-full bg-orange-500 text-black font-bold py-3 rounded-xl flex items-center justify-center gap-2"
           >
             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : "Generate New Plan"}
+          </button>
+          <button
+            onClick={() => openGenerate(true)}
+            disabled={loading}
+            className="w-full mt-3 bg-neutral-950 border border-orange-500/40 text-orange-400 font-bold py-3 rounded-xl flex items-center justify-center gap-2"
+          >
+            <ShoppingBag className="w-4 h-4" aria-hidden="true" /> Planear con mi despensa
           </button>
         </div>
       ) : (
@@ -258,7 +273,7 @@ export default function Planner() {
                 <ChevronLeft className="w-5 h-5" />
               </button>
               <span className="font-bold text-white uppercase tracking-wider text-sm">
-                {["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"][currentDayIndex] || `Day ${currentDayIndex + 1}`}
+                {dayLabel(planStart, currentDayIndex)}
               </span>
               <button 
                 onClick={() => setCurrentDayIndex(prev => Math.min(plan.length - 1, prev + 1))}
@@ -276,7 +291,7 @@ export default function Planner() {
               <div className="flex items-center justify-between text-xs text-neutral-500 px-1">
                 <span>
                   <span className={dayDone === dayMealCount && dayMealCount > 0 ? 'text-green-400 font-bold' : 'text-white font-bold'}>{dayDone}/{dayMealCount}</span> comidas
-                  {' · '}{Math.round(currentPlan.totals.calorias)} kcal · puntaje <span className="text-orange-500 font-bold">{Math.round(currentPlan.score)}</span>
+                  {' · '}{Math.round(currentPlan.totals.calorias)} kcal
                 </span>
                 <Link to="/" className="text-orange-400 hover:text-orange-300 print:hidden">Ver resumen →</Link>
               </div>
@@ -331,13 +346,22 @@ export default function Planner() {
             <ChefHat className="w-4 h-4" /> Mealprep
           </Link>
 
-          <button
-            onClick={() => setShowModal(true)}
-            disabled={loading}
-            className="w-full bg-neutral-900 border border-neutral-800 py-3 rounded-xl print:hidden flex items-center justify-center gap-2 mt-4 text-xs font-bold text-neutral-400 uppercase tracking-widest"
-          >
-            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Regenerate Plan"}
-          </button>
+          <div className="grid grid-cols-2 gap-2 mt-4 print:hidden">
+            <button
+              onClick={() => openGenerate(false)}
+              disabled={loading}
+              className="bg-neutral-900 border border-neutral-800 py-3 rounded-xl flex items-center justify-center gap-2 text-xs font-bold text-neutral-400 uppercase tracking-widest"
+            >
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Regenerate Plan"}
+            </button>
+            <button
+              onClick={() => openGenerate(true)}
+              disabled={loading}
+              className="bg-neutral-900 border border-orange-500/40 py-3 rounded-xl flex items-center justify-center gap-2 text-xs font-bold text-orange-400 uppercase tracking-widest"
+            >
+              <ShoppingBag className="w-4 h-4" aria-hidden="true" /> Con mi despensa
+            </button>
+          </div>
         </div>
       )}
 
@@ -390,19 +414,7 @@ export default function Planner() {
                 <button onClick={() => setSelectedRecipe(null)} className="text-neutral-500 hover:text-white p-2">✕</button>
               </div>
 
-              {(selectedRecipe.imageUrl || selectedRecipe.thumbnail_url) && (
-                <div className="w-full h-48 bg-neutral-900 rounded-xl mb-6 overflow-hidden relative">
-                  <img 
-                    src={selectedRecipe.imageUrl || selectedRecipe.thumbnail_url} 
-                    alt={selectedRecipe.title} 
-                    className="w-full h-full object-cover"
-                    referrerPolicy="no-referrer"
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).src = 'https://placehold.co/600x400/1a1a1a/4a4a4a?text=No+Image';
-                    }}
-                  />
-                </div>
-              )}
+              <RecipeImage key={selectedRecipe.id} recipe={selectedRecipe} className="h-48 mb-6" />
 
               <div className="grid grid-cols-4 gap-2 mb-8 bg-neutral-900 p-3 rounded-xl border border-neutral-800 text-center text-sm font-mono">
                 <div><div className="text-orange-500 font-bold">{selectedRecipe.macros?.calories || 0}</div><div className="text-[10px] text-neutral-500">kCal</div></div>
@@ -447,4 +459,13 @@ export default function Planner() {
 
     </div>
   );
+}
+
+// Real date of a plan day (day 1 = the day the plan was generated), e.g. "Hoy · miércoles 7 oct".
+function dayLabel(planStart: string | null, index: number): string {
+  if (!planStart) return `Día ${index + 1}`;
+  const date = addDays(new Date(`${planStart}T00:00`), index);
+  const name = format(date, "EEEE d MMM", { locale: es });
+  const rel = differenceInCalendarDays(date, new Date());
+  return rel === 0 ? `Hoy · ${name}` : rel === 1 ? `Mañana · ${name}` : rel === -1 ? `Ayer · ${name}` : name;
 }

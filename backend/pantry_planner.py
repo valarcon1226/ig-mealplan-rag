@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 
 from models import PantryItem, Recipe
 from rag_planner import RAGMealPlanner, intake_score
+from ingredient_normalizer import normalize_ingredient_name
+from shelf_life import days_left
 from shopping_list import _load_pantry_lookup, aggregate_ingredients
 from vector_db import perform_filtered_search
 
@@ -82,13 +84,33 @@ def _consume(needs: Dict[str, Dict[str, Any]], pantry: Dict[str, Dict[str, float
             units[d["unidad"]] = max(0.0, units[d["unidad"]] - d["cantidad"])
 
 
+URGENT_DAYS = 7  # lo que vence en una semana o menos se prioriza, más mientras antes venza
+
+
+def _urgency(needs, pantry, expiry: Dict[str, int], day_index: int) -> int:
+    """Cuánto usa la receta de lo que se va a dañar pronto (más alto = usarla antes)."""
+    score = 0
+    for d in _required(needs):
+        key = _pantry_key(d["display_name"], pantry)
+        if key in expiry:
+            score += max(0, URGENT_DAYS - (expiry[key] - day_index))
+    return score
+
+
 def plan_from_pantry(db, meal_types: List[str], targets: Dict[str, float], restrictions: List[str],
                      profile: Dict[str, Any], max_days: int = 7) -> Dict[str, Any]:
     planner = RAGMealPlanner(db)
     planner.avoid = [a for a in profile.get("avoid") or [] if a.strip()]
     planner.likes = [l for l in profile.get("likes") or [] if l.strip()]
 
-    pantry = _load_pantry_lookup(db.query(PantryItem).all())
+    items = db.query(PantryItem).all()
+    pantry = _load_pantry_lookup(items)
+    # Días que le quedan a cada item (normalizado como en la despensa); el más corto si hay repetidos.
+    expiry: Dict[str, int] = {}
+    for it in items:
+        key = normalize_ingredient_name(it.name)
+        if key:
+            expiry[key] = min(expiry.get(key, 10**6), days_left(it.name, it.added_at))
     if not pantry:
         return {"plan": [], "days_possible": 0,
                 "message": "Tu despensa está vacía: registra lo que tienes en Pantry para armar un plan con eso."}
@@ -99,7 +121,8 @@ def plan_from_pantry(db, meal_types: List[str], targets: Dict[str, float], restr
     days, used_recipes = [], set()
 
     for day_n in range(1, max_days + 1):
-        day_pantry = {k: dict(v) for k, v in pantry.items()}  # se confirma solo si el día sale completo
+        # Se confirma solo si el día sale completo. Lo que para ese día ya se habría dañado no se usa.
+        day_pantry = {k: dict(v) for k, v in pantry.items() if expiry.get(k, 10**6) >= day_n - 1}
         meals = []
         for meal_type in meal_types:
             meal_kcal = kcal_goal * MEAL_WEIGHTS.get(meal_type, 10) / total_weight
@@ -119,8 +142,10 @@ def plan_from_pantry(db, meal_types: List[str], targets: Dict[str, float], restr
                 missing = _missing(needs, day_pantry)
                 if missing is None:
                     continue
-                # Menos faltantes primero; luego no repetir recetas de días anteriores; luego calorías cercanas.
-                rank = (len(missing), recipe.id in used_recipes, abs(meal["calorias"] - meal_kcal))
+                # Primero lo que usa comida por vencer (no desperdiciar); luego menos faltantes,
+                # no repetir recetas de días anteriores y calorías cercanas.
+                rank = (-_urgency(needs, day_pantry, expiry, day_n - 1), len(missing),
+                        recipe.id in used_recipes, abs(meal["calorias"] - meal_kcal))
                 if best is None or rank < best[0]:
                     best = (rank, meal, needs, missing)
             if best is None:
@@ -149,7 +174,16 @@ def plan_from_pantry(db, meal_types: List[str], targets: Dict[str, float], restr
         message = f"Con lo que tienes alcanza para {n} día{'s' if n > 1 else ''}. Para más días, haz mercado."
     else:
         message = f"Con lo que tienes alcanza para los {n} días que pediste."
-    return {"plan": days, "days_possible": n, "message": message}
+    # Perecibles que vencen dentro del plan y quedan sin usar: avisar para no botarlos.
+    horizon = max(n, 1)
+    wasted = sorted(k for k, units in pantry.items()
+                    if expiry.get(k, 10**6) < horizon + URGENT_DAYS and expiry.get(k, 10**6) <= URGENT_DAYS
+                    and any(q > 0 for q in units.values()))
+    if wasted:
+        many = len(wasted) > 1
+        message += (f" Ojo: {', '.join(wasted)} {'vencen' if many else 'vence'} pronto y no se "
+                    f"{'alcanzan' if many else 'alcanza'} a usar en el plan: úsa{'los' if many else 'lo'} aparte o congéla{'los' if many else 'lo'}.")
+    return {"plan": days, "days_possible": n, "message": message, "por_vencer_sin_usar": wasted}
 
 
 if __name__ == "__main__":

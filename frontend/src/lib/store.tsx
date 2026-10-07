@@ -18,8 +18,6 @@ type StoreContextType = {
   updateProfile: (updates: Partial<UserProfile>) => void;
   dailyConsumption: { date: string; macros: typeof defaultProfile.dailyGoals; caloriesBurned: number };
   updateDailyConsumption: (updates: Partial<StoreContextType['dailyConsumption']>) => void;
-  folderPosts: any[];
-  setFolderPosts: (posts: any[]) => void;
   isLoading: boolean;
   loadFromCloud: (username: string) => Promise<void>;
   syncToCloud: () => Promise<void>;
@@ -81,7 +79,6 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     caloriesBurned: 0 
   });
   const [eatLog, setEatLog] = useState<EatEntry[]>([]);
-  const [folderPosts, setFolderPosts] = useState<any[]>([]);
   const [currentMealPlan, setCurrentMealPlanState] = useState<any | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -248,7 +245,7 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   const streakDays = computeStreak(eatLog);
 
   return (
-    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, markEaten, eatLog, logMeal, unlogMeal, streakDays, profile, updateProfile, dailyConsumption: todaysConsumption, updateDailyConsumption, folderPosts, setFolderPosts, isLoading, loadFromCloud, syncToCloud, currentMealPlan, setCurrentMealPlan, planStart }}>
+    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, markEaten, eatLog, logMeal, unlogMeal, streakDays, profile, updateProfile, dailyConsumption: todaysConsumption, updateDailyConsumption, isLoading, loadFromCloud, syncToCloud, currentMealPlan, setCurrentMealPlan, planStart }}>
       {children}
     </StoreContext.Provider>
   );

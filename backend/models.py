@@ -196,7 +196,29 @@ class PantryItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True, nullable=False)
     amount = Column(String, nullable=True)
+    added_at = Column(String, nullable=True)  # YYYY-MM-DD de compra: con shelf_life.py se sabe cuándo vence
 
 
 from database import ensure_columns
 ensure_columns("recipes", {"category": "VARCHAR", "raw_text": "TEXT", "structured_json": "TEXT"})
+ensure_columns("pantry_items", {"added_at": "VARCHAR"})
+
+
+class SavedImport(Base):
+    """
+    Un post guardado que vino de la exportación oficial de Instagram ("Descargar tu
+    información" -> Guardado). Es la cola del import en bloque: nunca se entra a la cuenta.
+    """
+    __tablename__ = "saved_imports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    shortcode = Column(String, unique=True, index=True, nullable=False)
+    url = Column(String, nullable=False)
+    username = Column(String, nullable=True)      # autor del post
+    collection = Column(String, nullable=True)    # colección donde lo guardaste (None = sin colección)
+    saved_at = Column(Integer, nullable=True)     # timestamp de cuándo lo guardaste
+    status = Column(String, default="pendiente")  # pendiente | en_recetario | procesada | sin_acceso | no_es_receta
+
+
+from database import engine
+SavedImport.__table__.create(bind=engine, checkfirst=True)

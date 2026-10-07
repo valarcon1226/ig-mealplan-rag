@@ -1016,6 +1016,28 @@ def generate_mealplan(request: MealPlanRequest):
     return result
 
 
+@app.post("/api/mealplan/from-pantry")
+def generate_mealplan_from_pantry(request: MealPlanRequest):
+    """Plan día por día solo con lo que hay en la despensa (ver pantry_planner.py)."""
+    from database import SessionLocal
+    from pantry_planner import plan_from_pantry
+    g = request.dailyGoals
+    targets = {"calorias": g.get("calories", 2000), "proteinas": g.get("protein", 150),
+               "carbohidratos": g.get("carbs", 200), "grasas": g.get("fat", 60),
+               "azucares": g.get("sugar"), "fibra": g.get("fiber")}
+    db = SessionLocal()
+    try:
+        return plan_from_pantry(
+            db, [m.lower() for m in request.meals], targets, request.restrictions,
+            {"goal": request.goal, "is_pregnant": request.is_pregnant, "avoid": request.avoid, "likes": request.likes},
+            max_days=max(1, min(14, request.num_days)),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
 class MealPrepRequest(BaseModel):
     sessions: list
 

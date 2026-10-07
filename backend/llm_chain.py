@@ -8,7 +8,7 @@ uno solo. Aquí cada llamada prueba los modelos en orden; si uno responde 429 se
 salta al siguiente en la misma llamada y queda "en pausa" una hora para no gastar
 requests golpeando un cupo agotado.
 
-Orden: modelos Gemini (los pedidos primero) -> Groq -> OpenRouter. Groq y
+Orden: modelos Gemini (los pedidos primero) -> 3 modelos Groq -> OpenRouter. Groq y
 OpenRouter son opcionales: solo se usan si GROQ_API_KEY / OPENROUTER_API_KEY
 están en el .env. Si todos fallan se levanta AllProvidersExhausted, cuyo mensaje
 incluye RESOURCE_EXHAUSTED para que los scripts de backfill se detengan limpios.
@@ -25,7 +25,9 @@ T = TypeVar("T", bound=BaseModel)
 
 # Calidad primero (nutrición) vs. volumen primero (extraer/estructurar).
 GEMINI_FLASH = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
-GEMINI_LITE = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"]
+GEMINI_LITE = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+# Cada modelo de Groq tiene su propio cupo gratis (~200k tokens/día).
+GROQ_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
 
 PAUSE_SECONDS = 3600  # un modelo que dio 429 no se vuelve a probar en esta hora
 _paused_until: dict = {}
@@ -66,17 +68,21 @@ def _providers(lite: bool):
         from langchain_google_genai import ChatGoogleGenerativeAI
         for m in gemini_models(lite):
             # max_retries=1: sin esto langchain reintenta un 429 por minutos y cuelga la cadena
-            yield m, True, lambda m=m: ChatGoogleGenerativeAI(model=m, google_api_key=gemini_key,
-                                                              temperature=0, max_retries=1, timeout=90)
+            yield m, "native", lambda m=m: ChatGoogleGenerativeAI(model=m, google_api_key=gemini_key,
+                                                                  temperature=0, max_retries=1, timeout=90)
     groq_key = get_env_var("GROQ_API_KEY")
-    if groq_key and _available("groq"):
+    if groq_key:
         from langchain_groq import ChatGroq
-        yield "groq", False, lambda: ChatGroq(model="openai/gpt-oss-120b", api_key=groq_key, temperature=0)
+        for m in GROQ_MODELS:
+            if _available(m):
+                # json_schema: Groq obliga al modelo a respetar el schema (con JSON por prompt,
+                # en recetas largas a veces no calzaba y se perdía la llamada).
+                yield m, "json_schema", lambda m=m: ChatGroq(model=m, api_key=groq_key, temperature=0, max_retries=1)
     router_key = get_env_var("OPENROUTER_API_KEY")
     if router_key and _available("openrouter"):
         from langchain_openai import ChatOpenAI
-        yield "openrouter", False, lambda: ChatOpenAI(model="google/gemma-4-31b-it:free", api_key=router_key,
-                                                       base_url="https://openrouter.ai/api/v1", temperature=0)
+        yield "openrouter", "prompt", lambda: ChatOpenAI(model="google/gemma-4-31b-it:free", api_key=router_key,
+                                                          base_url="https://openrouter.ai/api/v1", temperature=0)
 
 
 def invoke_structured(messages: list, schema: Type[T], lite: bool = False) -> T:
@@ -85,10 +91,12 @@ def invoke_structured(messages: list, schema: Type[T], lite: bool = False) -> T:
     from langchain_core.output_parsers import PydanticOutputParser
     parser = PydanticOutputParser(pydantic_object=schema)
     last: Optional[Exception] = None
-    for name, native, build in _providers(lite):
+    for name, mode, build in _providers(lite):
         try:
-            if native:
+            if mode == "native":
                 result = build().with_structured_output(schema).invoke(messages)
+            elif mode == "json_schema":
+                result = build().with_structured_output(schema, method="json_schema").invoke(messages)
             else:
                 hint = SystemMessage(content="Responde SOLO con JSON válido, sin markdown:\n" + parser.get_format_instructions())
                 result = parser.invoke(build().invoke([*messages, hint]))
@@ -107,7 +115,7 @@ def invoke_json(prompt, variables: dict, lite: bool = True) -> dict:
     """Corre un ChatPromptTemplate que pide JSON y devuelve el dict parseado."""
     from langchain_core.output_parsers import JsonOutputParser
     last: Optional[Exception] = None
-    for name, _native, build in _providers(lite):
+    for name, _mode, build in _providers(lite):
         try:
             return (prompt | build() | JsonOutputParser()).invoke(variables)
         except Exception as e:

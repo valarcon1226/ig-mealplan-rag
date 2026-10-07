@@ -40,3 +40,4 @@ backend/servings_audit.csv
 *.bak-*
 frontend_dev.log
 backend/ig_scrapp.db.bak-*
+backend/*.log

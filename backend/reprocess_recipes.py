@@ -10,6 +10,7 @@ Uso (desde backend/):
     python reprocess_recipes.py --limit 3     # probar con 3
     python reprocess_recipes.py               # todas las que tienen raw_text
     python reprocess_recipes.py --id 42       # una receta por su id
+    python reprocess_recipes.py --sin-nutricion   # solo las que quedaron en 0 kcal
 """
 import argparse
 import sys
@@ -21,7 +22,7 @@ from models import Recipe
 from recipe_store import persist_recipe_to_sqlite
 
 
-def main(limit: int | None, recipe_id: int | None):
+def main(limit: int | None, recipe_id: int | None, missing_nutrition: bool = False):
     api_key = get_env_var("GEMINI_API_KEY")
     if not api_key:
         sys.exit("Falta GEMINI_API_KEY en backend/.env")
@@ -31,7 +32,9 @@ def main(limit: int | None, recipe_id: int | None):
         query = db.query(Recipe).filter(Recipe.raw_text.isnot(None))
         if recipe_id:
             query = query.filter(Recipe.id == recipe_id)
-        rows = [(r.media_id, r.nombre, r.raw_text) for r in query.order_by(Recipe.id).all()]
+        rows = [(r.media_id, r.nombre, r.raw_text) for r in query.order_by(Recipe.id).all()
+                # sin nutrición = 0 kcal: el extractor no encontró cantidades y no se pudo calcular
+                if not missing_nutrition or not r.nutrition or not r.nutrition.calories]
     finally:
         db.close()
     if limit:
@@ -68,5 +71,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int)
     parser.add_argument("--id", type=int, dest="recipe_id")
+    parser.add_argument("--sin-nutricion", action="store_true", dest="missing_nutrition",
+                        help="solo las recetas que quedaron sin nutrición (0 kcal)")
     args = parser.parse_args()
-    main(args.limit, args.recipe_id)
+    main(args.limit, args.recipe_id, args.missing_nutrition)

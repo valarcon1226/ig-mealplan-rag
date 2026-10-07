@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useStore } from '../lib/store';
 import { Trash2, ShoppingCart, Archive, ListChecks, Plus, Loader2, Receipt, X } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { Link } from 'react-router-dom';
 import ExportButtons from '../lib/ExportButtons';
 
 export default function Pantry() {
@@ -149,10 +150,11 @@ function PantryInventory() {
 
   if (loading) return <div className="text-center py-10 text-neutral-500"><Loader2 className="w-8 h-8 animate-spin mx-auto opacity-50" /></div>;
 
+  // Only a failed request is an error; an empty pantry is just a new one (see the empty state below).
   if (loadError) return (
-    <div className="text-center py-10 text-neutral-500 space-y-3">
-      <p>Couldn't load your pantry. Is the backend running?</p>
-      <button onClick={load} className="bg-neutral-800 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-neutral-700">Retry</button>
+    <div className="text-center py-10 text-neutral-500 space-y-3" role="alert">
+      <p>No pudimos conectar con el servidor para cargar tu despensa.</p>
+      <button onClick={load} className="bg-neutral-800 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-neutral-700">Reintentar</button>
     </div>
   );
 
@@ -199,7 +201,11 @@ function PantryInventory() {
       )}
 
       {items.length === 0 ? (
-        <div className="text-center py-10 text-neutral-600">Your pantry is empty.</div>
+        <div className="text-center py-10 text-neutral-500 space-y-1">
+          <Archive className="w-8 h-8 mx-auto text-neutral-700 mb-2" aria-hidden="true" />
+          <p className="text-neutral-300 font-bold text-sm">Todavía no tienes nada registrado</p>
+          <p className="text-sm">Empieza agregando lo que tienes en casa arriba (ej. "1 kg de arroz") o sube la boleta de tu última compra.</p>
+        </div>
       ) : (
         <ul className="space-y-2">
           {items.map(item => (
@@ -230,10 +236,11 @@ const planMeals = (plan: any): any[] => !plan ? []
 export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { meals: any[]; title?: string }) {
   const [list, setList] = useState<GroceryItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const mealsKey = JSON.stringify(allMeals); // refetch when the content changes, not the array identity
 
-  // Full list of what the meals need; `covered` comes from the pantry.
+  // Full list of what the meals need, summed across the whole plan; `covered` comes from the pantry.
   const fetchList = async () => {
     if (allMeals.length === 0) return;
     try {
@@ -245,8 +252,9 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
       const data = await res.json();
       if (!res.ok || !Array.isArray(data.grocery_list)) throw new Error();
       setList(data.grocery_list);
+      setLoadError(false);
     } catch {
-      toast.error("Could not load the grocery list.");
+      setLoadError(true); // shown inline: an empty list here would wrongly read as "nothing to buy"
     }
   };
 
@@ -274,7 +282,7 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
           });
       if (!res.ok) throw new Error();
     } catch {
-      toast.error("Could not update your pantry.");
+      toast.error("No se pudo actualizar tu despensa.");
     } finally {
       await fetchList(); // source of truth is the pantry
       setBusy(null);
@@ -282,13 +290,26 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
   };
 
   if (allMeals.length === 0) return (
-    <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-xl text-center">
-      <ListChecks className="w-8 h-8 mx-auto text-orange-500 mb-2" />
-      <p className="text-sm text-neutral-400">Generate a meal plan in the Plan tab first and your grocery list will show up here.</p>
+    <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-xl text-center space-y-3">
+      <ListChecks className="w-8 h-8 mx-auto text-orange-500" aria-hidden="true" />
+      <p className="text-neutral-300 font-bold text-sm">Por ahora no hay lista de mercado</p>
+      <p className="text-sm text-neutral-400">Primero genera un plan de comidas o elige una receta del Cookbook, y aquí aparecerán sus ingredientes listos para comprar.</p>
+      <div className="flex gap-2 justify-center pt-1">
+        <Link to="/planner" className="bg-orange-500 text-black px-4 py-2 rounded-lg text-sm font-bold">Generar plan</Link>
+        <Link to="/cookbook" className="bg-neutral-800 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-neutral-700">Ver recetas</Link>
+      </div>
     </div>
   );
 
   if (loading && !list.length) return <div className="text-center py-10 text-neutral-500"><Loader2 className="w-8 h-8 animate-spin mx-auto opacity-50" /></div>;
+
+  if (loadError && !list.length) return (
+    <div className="text-center py-10 text-neutral-500 space-y-3" role="alert">
+      <p>No pudimos conectar con el servidor para armar tu lista de mercado.</p>
+      <button onClick={() => { setLoading(true); fetchList().finally(() => setLoading(false)); }}
+        className="bg-neutral-800 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-neutral-700">Reintentar</button>
+    </div>
+  );
 
   const done = list.filter(i => i.covered).length;
 
@@ -311,12 +332,12 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
     <div className="space-y-4">
       <div className="flex items-end justify-between">
         <div>
-          <h4 className="font-bold text-sm text-neutral-400 uppercase tracking-widest">Grocery List</h4>
-          <p className="text-xs text-neutral-500 mt-1">Check what you already have or just bought — it goes to your pantry.</p>
+          <h4 className="font-bold text-sm text-neutral-400 uppercase tracking-widest">{title}</h4>
+          <p className="text-xs text-neutral-500 mt-1">Todo lo que necesitas, sumado entre todas las comidas y redondeado para comprar. Marca lo que ya tienes o compraste: pasa a tu despensa.</p>
         </div>
         <span className="text-xs font-mono text-neutral-400 shrink-0">{done}/{list.length}</span>
       </div>
-      <div className="h-1.5 bg-neutral-800 rounded-full overflow-hidden" role="progressbar" aria-valuenow={done} aria-valuemin={0} aria-valuemax={list.length} aria-label="Items covered">
+      <div className="h-1.5 bg-neutral-800 rounded-full overflow-hidden" role="progressbar" aria-valuenow={done} aria-valuemin={0} aria-valuemax={list.length} aria-label="Ingredientes cubiertos">
         <div className="h-full bg-orange-500 transition-all" style={{ width: `${list.length ? (done / list.length) * 100 : 0}%` }} />
       </div>
 
@@ -325,7 +346,7 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
       )}
 
       {list.length === 0 ? (
-        <div className="text-center py-10 text-neutral-500">Your plan has no ingredients to buy.</div>
+        <div className="text-center py-10 text-neutral-500">Las recetas de este plan no traen ingredientes con cantidades.</div>
       ) : (
         <ul className="space-y-2">
           {list.map(item => {
@@ -344,7 +365,7 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
                     <span className={`font-bold text-sm text-white truncate ${item.covered ? 'line-through' : ''}`}>{item.item}</span>
                   </span>
                   <span className="text-xs font-mono text-orange-500 bg-orange-500/10 px-2 py-1 rounded-md shrink-0">
-                    {partial ? `buy ${item.missing} of ${item.amount}` : item.amount}
+                    {partial ? `comprar ${item.missing} de ${item.amount}` : item.amount}
                   </span>
                 </label>
               </li>

@@ -87,11 +87,16 @@ def _gemini_generate(payload: dict, api_key: str, timeout: int = 60) -> dict:
     """
     from llm_chain import gemini_models, mark_exhausted, AllProvidersExhausted
     for model in gemini_models(lite=True):
+        # La key va en header: en la URL terminaba impresa en los logs de error.
         resp = req_lib.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
-            json=payload, timeout=timeout)
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            headers={"x-goog-api-key": api_key}, json=payload, timeout=timeout)
         if resp.status_code == 429:
             mark_exhausted(model)
+            continue
+        if resp.status_code >= 500:
+            # 503 "high demand": el modelo está saturado ahora, no sin cupo -> probar otro sin pausarlo
+            print(f"   [llm_chain] {model} respondió {resp.status_code}, probando el siguiente")
             continue
         resp.raise_for_status()
         time.sleep(3)  # cortesía para RPM
@@ -159,6 +164,9 @@ def extract_text_from_media(inputs: dict) -> dict:
             resp = _gemini_generate(payload, gemini_api_key)
             raw_text = resp["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
+            from llm_chain import AllProvidersExhausted
+            if isinstance(e, AllProvidersExhausted):
+                raise  # sin cupo: mejor parar y reintentar que guardar una receta hecha solo con el caption
             caption = inputs.get("caption", "")
             if caption:
                 # Fallback to using just the caption since the image URL expired
@@ -189,7 +197,7 @@ def extract_text_from_media(inputs: dict) -> dict:
             print("Uploading to Gemini Files API...")
             upload_url = (
                 f"https://generativelanguage.googleapis.com/upload/v1beta/files"
-                f"?uploadType=multipart&key={gemini_api_key}"
+                f"?uploadType=multipart"
             )
             with open(tmp_path, "rb") as f:
                 video_bytes = f.read()
@@ -204,7 +212,7 @@ def extract_text_from_media(inputs: dict) -> dict:
 
             upload_resp = req_lib.post(
                 upload_url,
-                headers={"Content-Type": f"multipart/related; boundary={boundary}"},
+                headers={"Content-Type": f"multipart/related; boundary={boundary}", "x-goog-api-key": gemini_api_key},
                 data=body,
                 timeout=120
             )
@@ -219,8 +227,8 @@ def extract_text_from_media(inputs: dict) -> dict:
                 time.sleep(5)
                 try:
                     status_resp = req_lib.get(
-                        f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={gemini_api_key}",
-                        timeout=30
+                        f"https://generativelanguage.googleapis.com/v1beta/{file_name}",
+                        headers={"x-goog-api-key": gemini_api_key}, timeout=30
                     )
                     state = status_resp.json().get("state")
                     print(f"Video state: {state}")
@@ -260,6 +268,9 @@ def extract_text_from_media(inputs: dict) -> dict:
 
         except Exception as e:
             print("Exception in extract_text_from_media:", str(e))
+            from llm_chain import AllProvidersExhausted
+            if isinstance(e, AllProvidersExhausted):
+                raise  # sin cupo: mejor parar y reintentar que guardar una receta hecha solo con el caption
             caption = inputs.get("caption", "")
             if caption:
                 # Fallback to using just the caption since the video URL expired
@@ -316,7 +327,7 @@ REGLAS ESTRICTAS:
 1. Responde ÚNICAMENTE con JSON válido, sin markdown, sin bloques de código, sin texto adicional.
 2. Si el texto dice 'NO_ES_RECETA', devuelve exactamente: {{"nombre": null}}
 3. Si el tiempo no se menciona, usa null. 'porciones' SOLO si el texto dice explícitamente cuántas porciones/personas rinde; si no lo dice, usa null (no adivines: se calculan después a partir de los ingredientes).
-4. Normaliza las cantidades: convierte tazas, cucharadas, etc. a gramos/ml cuando sea posible.
+4. Normaliza las cantidades: convierte tazas, cucharadas, etc. a gramos/ml cuando sea posible. Si el texto NO dice cuánto de un ingrediente, estima la cantidad típica para esa receta (ej. un bark de yogur: ~300 g de yogur griego) en vez de dejar null: sin cantidades no se puede calcular la nutrición. Solo sal, pimienta y especias "al gusto" pueden quedar sin cantidad.
 5. Separa cada paso de las instrucciones como un elemento independiente de la lista. NO resumas: conserva en cada paso las cantidades, temperaturas, nivel de fuego, tiempos (incluido reposo/refrigeración) y señales de punto que traiga el texto, incluidos los valores marcados 'aprox.'. No antepongas "Paso N:".
 6. Genera una lista de 'tags' indicando el tipo de comida (ej: desayuno, almuerzo, cena, postre, snack) según los ingredientes y el estilo. IMPORTANTE: si la receta es una salsa, aderezo, dip, mermelada, crema untable, topping o cualquier acompañamiento que NO se coma solo como una comida o snack completo, NO le asignes tags de tipo de comida (desayuno/almuerzo/cena/snack) — en su lugar usa únicamente el tag "condimento" (junto con "salsa", "aderezo", "dip", etc. si aplica). Estos tags de tipo de comida son solo para platos que alguien serviría como esa comida completa por sí sola. Lo mismo para bebidas (chocolate caliente, té, café, jugos, electrolitos, mocktails): usa solo "bebida" y "otros", sin tags de tipo de comida. Y para suplementos o remedios caseros (magnesio en polvo, proteína en polvo, termogénicos): usa solo "suplemento" y "otros".
 7. Identifica el 'tipo_cocina' (ej: italiana, mexicana, asiática, mediterránea, americana, latina, fusión, etc.) según los ingredientes y técnicas usadas. Si no es claramente de ninguna tradición específica, usa "internacional".

@@ -224,6 +224,19 @@ async function startServer() {
     }
   });
 
+  app.post("/api/mealplan/from-pantry", async (req, res) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/mealplan/from-pantry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        body: JSON.stringify(req.body)
+      });
+      res.status(response.status).json(await response.json());
+    } catch (error: any) {
+      res.status(500).json({ error: "Failed to plan from pantry: " + error.message });
+    }
+  });
+
   app.post("/api/intake-score", async (req, res) => {
     try {
       const response = await fetch(`${BACKEND_URL}/api/intake-score`, {

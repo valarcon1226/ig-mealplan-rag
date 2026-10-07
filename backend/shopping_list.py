@@ -145,6 +145,25 @@ def _load_pantry_lookup(pantry_items: List) -> Dict[str, Dict[str, float]]:
     return lookup
 
 
+def friendly_amount(qty: float, unit: str) -> str:
+    """
+    Cantidad fácil de comprar o medir en batch, redondeada HACIA ARRIBA (mejor
+    sobrar que faltar): 1234 g -> "1.3 kg", 333.3 g -> "340 g", 2.2 pza -> "3 unidades".
+    """
+    import math
+    up = lambda x, step: math.ceil(round(x / step, 6)) * step
+    if unit in ("g", "ml"):
+        big, big_unit = ("kg", 1000) if unit == "g" else ("L", 1000)
+        if qty >= 1000:
+            return f"{up(qty / big_unit, 0.1):g} {big}"
+        step = 1 if qty < 10 else 5 if qty < 100 else 10
+        return f"{up(qty, step):g} {unit}"
+    if unit == "pza":
+        n = math.ceil(round(qty, 6))
+        return f"{n} unidad" if n == 1 else f"{n} unidades"
+    return f"{up(qty, 0.5):g} {unit}".strip()  # tazas, cucharadas...: de a media
+
+
 def compare_with_pantry(aggregated: Dict[str, Dict[str, Any]], pantry_items: List) -> List[Dict[str, Any]]:
     """
     Devuelve TODO lo que pide el plan (como si el pantry estuviera vacío), y
@@ -171,8 +190,8 @@ def compare_with_pantry(aggregated: Dict[str, Dict[str, Any]], pantry_items: Lis
         faltante = round(necesitado - disponible, 1)
         shopping_list.append({
             "item": name,
-            "amount": f"{round(necesitado, 1):g} {unidad}".strip(),
-            "missing": f"{faltante:g} {unidad}".strip() if faltante > 0 else "",
+            "amount": friendly_amount(necesitado, unidad),
+            "missing": friendly_amount(faltante, unidad) if faltante > 0 else "",
             "covered": faltante <= 0,
         })
 
@@ -197,5 +216,16 @@ if __name__ == "__main__":
                            ("arroz", ("arroz", "")), ("3", ("3", ""))]:
         assert parse_free_text(text) == expected, (text, parse_free_text(text))
     assert generate_shopping_list([{"ingredients": [{"name": "arroz", "amount": "500 g"}]}],
-                                  [P(name="arroz", amount="1 lb")])[0]["missing"] == "46.4 g"
+                                  [P(name="arroz", amount="1 lb")])[0]["missing"] == "50 g"  # 46.4 g, redondeado hacia arriba
+    assert friendly_amount(1200, "g") == "1.2 kg"
+    assert friendly_amount(1234, "g") == "1.3 kg"
+    assert friendly_amount(333.3, "g") == "340 g"
+    assert friendly_amount(45, "g") == "45 g"
+    assert friendly_amount(7.2, "g") == "8 g"
+    assert friendly_amount(1500, "ml") == "1.5 L"
+    assert friendly_amount(180, "ml") == "180 ml"
+    assert friendly_amount(1, "pza") == "1 unidad"
+    assert friendly_amount(2.2, "pza") == "3 unidades"
+    assert friendly_amount(1.2, "taza") == "1.5 taza"
     print("ok")
+

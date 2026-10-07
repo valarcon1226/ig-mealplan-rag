@@ -53,8 +53,10 @@ def persist_recipe_to_sqlite(media_id: str, final_recipe: dict, post: dict = Non
         recipe = db.query(Recipe).filter(Recipe.media_id == media_id).first()
         if recipe:
             if recipe.nutrition:
-                for field, value in nutrition_fields.items():
-                    setattr(recipe.nutrition, field, value)
+                # Si esta vez no se pudo calcular (sin cantidades), no pisar la nutrición que ya había con ceros.
+                if nut_data:
+                    for field, value in nutrition_fields.items():
+                        setattr(recipe.nutrition, field, value)
             else:
                 nutrition = NutritionInformation(**nutrition_fields)
                 db.add(nutrition)
@@ -76,7 +78,8 @@ def persist_recipe_to_sqlite(media_id: str, final_recipe: dict, post: dict = Non
         if final_recipe.get("estructura"):
             recipe.structured_json = json.dumps(final_recipe["estructura"], ensure_ascii=False)
         recipe.tiempo_preparacion_min = time_prep
-        recipe.servings = servings_val
+        if nut_data or not recipe.servings:  # las porciones van con la nutrición por porción que se conserva
+            recipe.servings = servings_val
         recipe.tags = ", ".join(str(t).lower().strip() for t in tags) if tags else None
         recipe.instructions = json.dumps(final_recipe.get("instrucciones", []), ensure_ascii=False)
         recipe.ingredients_raw = json.dumps(ingredientes, ensure_ascii=False)

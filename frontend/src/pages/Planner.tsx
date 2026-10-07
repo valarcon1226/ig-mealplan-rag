@@ -1,30 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useStore, sumMacros } from '../lib/store';
-import { buildPlanFingerprint } from '../lib/mealprepStorage';
+import { useStore } from '../lib/store';
+import { planIdOf, mealMacros, dayEntries, todayPlanIndex } from '../lib/plan';
 import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, ChevronLeft, ChevronRight, ChefHat, Check, RefreshCw, Utensils } from 'lucide-react';
-import { Macros, Recipe } from '../lib/types';
-
-// Short stable id per generated plan, so checks from an old plan don't carry over.
-const planIdOf = (plan: any) => {
-  let h = 0;
-  for (const c of buildPlanFingerprint(plan)) h = (h * 31 + c.charCodeAt(0)) | 0;
-  return (h >>> 0).toString(36);
-};
-
-const mealMacros = (meal: any): Macros => ({
-  calories: meal.calorias || 0, protein: meal.proteinas || 0, carbs: meal.carbohidratos || 0,
-  fat: meal.grasas || 0, fiber: meal.fibra || 0, sugar: meal.azucar || 0,
-});
+import { Recipe } from '../lib/types';
 
 export default function Planner() {
-  const { profile, recipes, setCurrentMealPlan, currentMealPlan, eatLog, logMeal, unlogMeal } = useStore();
+  const { profile, recipes, setCurrentMealPlan, currentMealPlan, eatLog, logMeal, unlogMeal, planStart } = useStore();
   const [plan, setPlan] = useState<any>(currentMealPlan); // puede ser array o objeto
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
-  
+
   const [numDays, setNumDays] = useState(1);
-  const [currentDayIndex, setCurrentDayIndex] = useState(0);
+  const [fromPantry, setFromPantry] = useState(false);
+  const [planNote, setPlanNote] = useState<string | null>(null);
+  // Opens on today's plan day.
+  const [currentDayIndex, setCurrentDayIndex] = useState(() => todayPlanIndex(currentMealPlan, planStart));
 
   // Selecciones disponibles (con soporte para múltiples snacks)
   const mealOptions = [
@@ -42,7 +33,6 @@ export default function Planner() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [replaceKey, setReplaceKey] = useState<string | null>(null);
   const [replaceQuery, setReplaceQuery] = useState('');
-  const [realScore, setRealScore] = useState<number | null>(null);
 
   const toggleMeal = (id: string) => {
     if (selectedMealIds.includes(id)) {
@@ -63,8 +53,9 @@ export default function Planner() {
 
     setLoading(true);
     setShowModal(false);
+    setPlanNote(null);
     try {
-      const res = await fetch('/api/mealplan/generate', {
+      const res = await fetch(fromPantry ? '/api/mealplan/from-pantry' : '/api/mealplan/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -84,6 +75,14 @@ export default function Planner() {
         alert(data.detail || data.error || "Failed to generate plan");
         setPlan(null);
         setCurrentMealPlan(null);
+      } else if (fromPantry) {
+        // Days that fit the pantry, plus "con lo que tienes alcanza para N días…".
+        setPlanNote(data.message);
+        if (data.plan.length) {
+          setPlan(data.plan);
+          setCurrentMealPlan(data.plan);
+          setCurrentDayIndex(0);
+        }
       } else {
         setPlan(data);
         setCurrentMealPlan(data);
@@ -123,35 +122,8 @@ export default function Planner() {
   const planId = planIdOf(plan);
   const keyFor = (i: number) => `${planId}:${currentDayIndex}:${i}`;
   const entryFor = (key: string) => eatLog.find(e => e.planKey === key);
-  const dayEntries = eatLog.filter(e => e.planKey?.startsWith(`${planId}:${currentDayIndex}:`));
-  const dayDone = dayEntries.length;
+  const dayDone = dayEntries(eatLog, planId, currentDayIndex).length;
   const dayMealCount = currentPlan?.meals?.length ?? 0;
-
-  // Real score = same backend formula as the planned one, over what was actually eaten.
-  // "Ate something else" entries have no macros, so they add no points.
-  const eatenTotals = sumMacros(dayEntries);
-  const eatenWithMacros = dayEntries.some(e => e.macros);
-  useEffect(() => {
-    if (!currentPlan?.targets || !eatenWithMacros) { setRealScore(null); return; }
-    let cancelled = false;
-    fetch('/api/intake-score', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        totals: {
-          calorias: eatenTotals.calories, proteinas: eatenTotals.protein, carbohidratos: eatenTotals.carbs,
-          grasas: eatenTotals.fat, fibra: eatenTotals.fiber, azucar: eatenTotals.sugar,
-        },
-        targets: currentPlan.targets,
-        goal: profile.goal ?? 'maintain',
-        is_pregnant: !!profile.isPregnant,
-      }),
-    })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (!cancelled) setRealScore(d ? d.total : null); })
-      .catch(() => { if (!cancelled) setRealScore(null); });
-    return () => { cancelled = true; };
-  }, [JSON.stringify(eatenTotals), eatenWithMacros, planId, currentDayIndex]);
 
   const toggleEaten = (meal: any, key: string) => {
     const entry = entryFor(key);
@@ -212,6 +184,15 @@ export default function Planner() {
               />
             </div>
 
+            <label className="flex items-start gap-3 p-3 bg-black rounded-lg border border-neutral-800 cursor-pointer">
+              <input type="checkbox" checked={fromPantry} onChange={e => setFromPantry(e.target.checked)}
+                className="w-5 h-5 mt-0.5 accent-orange-500" />
+              <span>
+                <span className="text-white font-medium block">Usar solo lo que tengo en la despensa</span>
+                <span className="text-xs text-neutral-500">Arma los días que alcancen con tu despensa (puede faltar algo chico) y te dice cuántos días te dura.</span>
+              </span>
+            </label>
+
             <p className="text-sm text-neutral-400">Which meals do you want to include each day?</p>
             <div className="space-y-2 max-h-[40vh] overflow-y-auto">
               {mealOptions.map(option => (
@@ -232,6 +213,14 @@ export default function Planner() {
               <button onClick={generatePlan} className="flex-1 py-3 bg-orange-500 text-black rounded-xl font-bold text-sm">Generate</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Pantry plan result: "con lo que tienes alcanza para N días…" (also when it's 0 and no plan shows) */}
+      {planNote && (
+        <div role="status" className="bg-orange-500/10 border border-orange-500/30 text-orange-200 rounded-xl p-3 text-sm flex items-start justify-between gap-3 print:hidden">
+          <span>{planNote}</span>
+          <Link to="/pantry" className="shrink-0 text-orange-400 font-bold hover:text-orange-300">Ir a mercado →</Link>
         </div>
       )}
 
@@ -283,52 +272,13 @@ export default function Planner() {
 
           {currentPlan && (
             <>
-              <div className="bg-neutral-900/50 p-4 rounded-xl border border-neutral-800/50">
-                <div className="flex justify-between items-center mb-2">
-                    <span className="text-neutral-400 text-sm">Intake Score (Day {currentPlan.day || 1})</span>
-                    <span className="text-sm text-neutral-400">
-                      Planeado <span className="text-orange-500 font-bold">{Math.round(currentPlan.score)}</span>
-                      {realScore != null && <> · Real <span className="text-green-400 font-bold">{realScore}</span></>}
-                      <span className="text-neutral-600 text-xs">/100</span>
-                    </span>
-                </div>
-                <div className="text-xs text-neutral-500 mb-2">
+              {/* Detailed stats (real score, macros vs targets) live on the Dashboard ("Today"). */}
+              <div className="flex items-center justify-between text-xs text-neutral-500 px-1">
+                <span>
                   <span className={dayDone === dayMealCount && dayMealCount > 0 ? 'text-green-400 font-bold' : 'text-white font-bold'}>{dayDone}/{dayMealCount}</span> comidas
-                  {eatenWithMacros && <> · {Math.round(eatenTotals.calories)} kcal reales</>}
-                </div>
-                {currentPlan.score_breakdown && (
-                  <div className="flex flex-wrap gap-x-3 gap-y-1 mb-3 text-[10px] text-neutral-500">
-                    {([['calorias', 'Cal', 45], ['proteinas', 'Pro', 20], ['carbohidratos', 'Carb', 15], ['grasas', 'Fat', 10], ['fibra', 'Fib', 5], ['azucar', 'Azú', 5]] as const).map(([key, label, max]) => (
-                      <span key={key}>{label} <span className={currentPlan.score_breakdown[key] >= max ? 'text-green-400' : 'text-white'}>{Math.round(currentPlan.score_breakdown[key])}</span>/{max}</span>
-                    ))}
-                  </div>
-                )}
-                <div className="flex gap-2 text-center text-xs">
-                    <div className="w-1/3 shrink-0 bg-black p-3 rounded border border-neutral-800 flex flex-col items-center justify-center">
-                      <div className="text-neutral-500 mb-1">Calorías</div>
-                      <div className="text-3xl font-bold text-orange-400 leading-none">{Math.round(currentPlan.totals.calorias)}</div>
-                      <div className="text-neutral-600 mt-1">{currentPlan.targets?.calorias != null ? `/ ${Math.round(currentPlan.targets.calorias)} kcal` : 'kcal'}</div>
-                    </div>
-                    <div className="flex-1 grid grid-cols-6 gap-2">
-                      <div className="col-span-2 bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500">Pro</div><div className="font-bold text-white">{Math.round(currentPlan.totals.proteinas)}g</div></div>
-                      <div className="col-span-2 bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500">Carb</div><div className="font-bold text-white">{Math.round(currentPlan.totals.carbohidratos)}g</div></div>
-                      <div className="col-span-2 bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500">Fat</div><div className="font-bold text-white">{Math.round(currentPlan.totals.grasas)}g</div></div>
-                      <div className="col-span-3 bg-black p-2 rounded border border-neutral-800">
-                        <div className="text-neutral-500">Fibra</div>
-                        <div className={`font-bold ${(currentPlan.totals.fibra ?? 0) >= (currentPlan.targets?.fibra ?? 0) ? 'text-green-400' : 'text-white'}`}>
-                          {Math.round(currentPlan.totals.fibra ?? 0)}g
-                        </div>
-                        {currentPlan.targets?.fibra != null && <div className="text-neutral-600">/ {currentPlan.targets.fibra}g</div>}
-                      </div>
-                      <div className="col-span-3 bg-black p-2 rounded border border-neutral-800">
-                        <div className="text-neutral-500">Azúcar</div>
-                        <div className={`font-bold ${currentPlan.targets?.azucares != null && (currentPlan.totals.azucar ?? 0) > currentPlan.targets.azucares ? 'text-red-400' : 'text-white'}`}>
-                          {Math.round(currentPlan.totals.azucar ?? 0)}g
-                        </div>
-                        {currentPlan.targets?.azucares != null && <div className="text-neutral-600">máx {currentPlan.targets.azucares}g</div>}
-                      </div>
-                    </div>
-                </div>
+                  {' · '}{Math.round(currentPlan.totals.calorias)} kcal · puntaje <span className="text-orange-500 font-bold">{Math.round(currentPlan.score)}</span>
+                </span>
+                <Link to="/" className="text-orange-400 hover:text-orange-300 print:hidden">Ver resumen →</Link>
               </div>
 
               <div className="space-y-4 print:text-black print:bg-white pb-4">
@@ -352,7 +302,10 @@ export default function Planner() {
                           <div className="flex-1 min-w-0 cursor-pointer" onClick={() => openRecipeDetails(meal, key)}>
                             <div className={`group-hover:text-orange-400 transition-colors print:text-black font-medium ${replaced ? 'line-through text-neutral-500' : 'text-white'}`}>{meal.nombre}</div>
                             {replaced && <div className="text-green-400 text-xs mt-0.5">→ {entry!.title}</div>}
-                            <div className="text-neutral-500 text-xs mt-1">{meal.calorias} kcal · {meal.proteinas}g pro</div>
+                            <div className="text-neutral-500 text-xs mt-1">{Math.round(meal.calorias)} kcal · {Math.round(meal.proteinas)}g pro</div>
+                            {meal.faltantes?.length > 0 && (
+                              <div className="text-yellow-500 text-xs mt-0.5">Te falta: {meal.faltantes.join(', ')}</div>
+                            )}
                           </div>
                           <button
                             onClick={() => setReplaceKey(key)}

@@ -1,6 +1,9 @@
 import { useStore } from '../lib/store';
-import { Flame, Target, Utensils, Activity, HeartPulse } from 'lucide-react';
+import { Flame, Target, Utensils, Activity, HeartPulse, CalendarCheck, Check } from 'lucide-react';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { format } from 'date-fns';
+import { planDays, todayPlanIndex, planIdOf, dayEntries, useRealScore, mealMacros } from '../lib/plan';
 import { getPregnancyWeeks } from '../lib/macroCalculator';
 import toast from 'react-hot-toast';
 
@@ -20,7 +23,7 @@ const getCyclePhase = (dateStr?: string) => {
 }
 
 export default function Dashboard() {
-  const { profile, dailyConsumption, updateDailyConsumption, streakDays } = useStore();
+  const { profile, dailyConsumption, updateDailyConsumption, streakDays, eatLog, logMeal, unlogMeal, currentMealPlan, planStart } = useStore();
   const [burnedInput, setBurnedInput] = useState('');
   const [isSyncingGarmin, setIsSyncingGarmin] = useState(false);
 
@@ -70,10 +73,24 @@ export default function Dashboard() {
     }
   };
 
+  // Today's plan day: its targets are the goals (same numbers the Planner scored against,
+  // e.g. fiber adjusted to protein); without a plan, the profile goals.
+  const plan = planDays(currentMealPlan);
+  const dayIndex = todayPlanIndex(currentMealPlan, planStart);
+  const today = plan[dayIndex];
+  const t = today?.targets;
+  const pg = profile.dailyGoals;
+  const goals = t
+    ? { calories: t.calorias ?? pg.calories, protein: t.proteinas ?? pg.protein, carbs: t.carbohidratos ?? pg.carbs,
+        fat: t.grasas ?? pg.fat, fiber: t.fibra ?? pg.fiber, sugar: t.azucares ?? pg.sugar }
+    : pg;
+  const todaysLog = eatLog.filter(e => e.date === format(new Date(), 'yyyy-MM-dd'));
+  const realScore = useRealScore(todaysLog, t, profile);
+  const planId = planIdOf(currentMealPlan);
+  const doneKeys = new Set(dayEntries(eatLog, planId, dayIndex).map(e => e.planKey));
+
   const macros = dailyConsumption.macros;
-  const goals = profile.dailyGoals;
-  
-  const consumedCalories = dailyConsumption.macros.calories;
+  const consumedCalories = Math.round(macros.calories);
   const netCalories = consumedCalories - dailyConsumption.caloriesBurned;
   const remaining = goals.calories - netCalories;
   
@@ -97,7 +114,7 @@ export default function Dashboard() {
              <Target className="w-5 h-5 text-orange-500" />
              <h2 className="text-lg font-bold">Energy Balance</h2>
           </div>
-          <div className="text-xs font-mono text-neutral-500">Goal: {goals.calories}</div>
+          <div className="text-xs font-mono text-neutral-500">Goal: {Math.round(goals.calories)}</div>
         </div>
         
         <div className="grid grid-cols-3 gap-4 mb-6 text-center">
@@ -110,7 +127,7 @@ export default function Dashboard() {
             <div className="text-xs text-neutral-500 uppercase tracking-widest mt-1">Burned</div>
           </div>
           <div>
-            <div className={`text-2xl font-bold ${remaining < 0 ? 'text-red-400' : 'text-blue-400'}`}>= {netCalories}</div>
+            <div className={`text-2xl font-bold ${remaining < 0 ? 'text-red-400' : 'text-blue-400'}`}>= {Math.round(netCalories)}</div>
             <div className="text-xs text-neutral-500 uppercase tracking-widest mt-1">Net</div>
           </div>
         </div>
@@ -148,6 +165,60 @@ export default function Dashboard() {
         </div>
       </section>
 
+      {/* Today's plan: progress and real vs planned score (the Planner only lists meals) */}
+      {today && (
+        <section className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <CalendarCheck className="w-5 h-5 text-orange-500" />
+              <h2 className="text-lg font-bold">Plan de hoy{plan.length > 1 && <span className="text-neutral-500 font-normal text-sm"> · día {dayIndex + 1}/{plan.length}</span>}</h2>
+            </div>
+            <Link to="/planner" className="text-xs text-orange-400 hover:text-orange-300">Abrir plan →</Link>
+          </div>
+
+          <div className="grid grid-cols-3 gap-4 mb-4 text-center">
+            <div>
+              <div className={`text-2xl font-bold ${doneKeys.size === today.meals.length ? 'text-green-400' : 'text-white'}`}>{doneKeys.size}/{today.meals.length}</div>
+              <div className="text-xs text-neutral-500 uppercase tracking-widest mt-1">Comidas</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-green-400">{realScore ?? '—'}</div>
+              <div className="text-xs text-neutral-500 uppercase tracking-widest mt-1">Puntaje real</div>
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-orange-500">{Math.round(today.score)}</div>
+              <div className="text-xs text-neutral-500 uppercase tracking-widest mt-1">Planeado</div>
+            </div>
+          </div>
+
+          <ul className="space-y-2">
+            {today.meals.map((meal: any, i: number) => {
+              const key = `${planId}:${dayIndex}:${i}`;
+              const entry = eatLog.find(e => e.planKey === key);
+              // Same toggle as the Planner: logs the planned meal (macros, Cookbook "Eaten", streak) or undoes it.
+              const toggle = () => entry
+                ? unlogMeal(entry.id)
+                : logMeal({ title: meal.nombre, recipeId: String(meal.recipe_id), planKey: key, macros: mealMacros(meal) });
+              return (
+                <li key={i}>
+                  <button onClick={toggle} aria-pressed={!!entry}
+                    aria-label={entry ? `Desmarcar ${meal.meal_type}` : `Marcar ${meal.meal_type} como comido`}
+                    className="w-full flex items-center gap-3 text-sm text-left rounded-lg p-1 -m-1 hover:bg-neutral-800 transition-colors">
+                    <span className={`w-5 h-5 shrink-0 rounded-full border flex items-center justify-center ${entry ? 'bg-green-500 border-green-500 text-black' : 'border-neutral-600 text-transparent'}`}>
+                      <Check className="w-3.5 h-3.5" />
+                    </span>
+                    <span className="w-16 shrink-0 text-orange-500 font-bold uppercase text-[10px]">{meal.meal_type}</span>
+                    <span className={`truncate ${entry ? 'text-neutral-500 line-through' : 'text-white'}`}>
+                      {entry && entry.recipeId !== String(meal.recipe_id) ? `${meal.nombre} → ${entry.title}` : meal.nombre}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+
       {/* Macros */}
       <section className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6">
         <div className="flex items-center gap-3 mb-6">
@@ -156,14 +227,11 @@ export default function Dashboard() {
         </div>
 
         <div className="space-y-5">
-          <MacroBar label="Protein" current={macros.protein} goal={goals.protein} color="bg-orange-500" />
-          <MacroBar label="Carbs" current={macros.carbs} goal={goals.carbs} color="bg-blue-500" />
-          <MacroBar label="Fats" current={macros.fat} goal={goals.fat} color="bg-yellow-500" />
-          
-          <div className="pt-4 mt-6 border-t border-neutral-800 grid grid-cols-2 gap-4">
-            <MicroStat label="Sugar" current={macros.sugar} goal={goals.sugar} limit />
-            <MicroStat label="Fiber" current={macros.fiber} goal={goals.fiber} />
-          </div>
+          <MacroBar label="Protein" current={macros.protein} goal={goals.protein} />
+          <MacroBar label="Carbs" current={macros.carbs} goal={goals.carbs} />
+          <MacroBar label="Fats" current={macros.fat} goal={goals.fat} />
+          <MacroBar label="Fiber" current={macros.fiber} goal={goals.fiber} />
+          <MacroBar label="Sugar" current={macros.sugar} goal={goals.sugar} limit />
         </div>
       </section>
 
@@ -205,30 +273,30 @@ export default function Dashboard() {
   );
 }
 
-function MacroBar({ label, current, goal, color }: { label: string, current: number, goal: number, color: string }) {
-  const percent = Math.min(100, Math.max(0, (current / goal) * 100)) || 0;
+// Fills in proportion to what's been eaten. A `limit` (sugar) is a maximum, not a target:
+// the bar is a green -> yellow -> red gradient sized to the whole track, so filling it reveals
+// more of it: little sugar shows only green, reaching the max shows the red end. Over the max the
+// bar stays full and the number keeps growing (in red).
+function MacroBar({ label, current, goal, limit = false }: { label: string, current: number, goal: number, limit?: boolean }) {
+  const ratio = goal > 0 ? Math.max(0, current / goal) : 0;
+  const percent = Math.min(100, ratio * 100);
+  const gradient = limit && percent > 0 ? {
+    backgroundImage: 'linear-gradient(to right, #22c55e, #eab308 55%, #ef4444)',
+    backgroundSize: `${(100 / percent) * 100}% 100%`, // gradient spans the full track, not just the fill
+  } : {};
   return (
     <div>
       <div className="flex justify-between text-sm mb-2 font-medium">
         <span>{label}</span>
-        <span className="text-neutral-400"><span className="text-white">{current}g</span> / {goal}g</span>
+        <span className="text-neutral-400">
+          <span className={limit && ratio > 1 ? 'text-red-400' : 'text-white'}>{Math.round(current)}g</span>
+          {' / '}{limit && 'máx '}{Math.round(goal)}g
+        </span>
       </div>
-      <div className="h-2 w-full bg-neutral-950 rounded-full overflow-hidden">
-        <div className={`h-full ${color} transition-all duration-500`} style={{ width: `${percent}%` }} />
+      <div className="h-2 w-full bg-neutral-950 rounded-full overflow-hidden"
+        role="progressbar" aria-label={label} aria-valuenow={Math.round(current)} aria-valuemin={0} aria-valuemax={Math.round(goal)}>
+        <div className={`h-full transition-all duration-500 ${limit ? '' : 'bg-orange-500'}`} style={{ width: `${percent}%`, ...gradient }} />
       </div>
     </div>
   );
-}
-
-function MicroStat({ label, current, goal, limit = false }: { label: string, current: number, goal: number, limit?: boolean }) {
-  const over = limit && current > goal;
-  return (
-    <div>
-      <div className="text-xs text-neutral-500 uppercase tracking-wider mb-1">{label}</div>
-      <div className="font-mono text-sm">
-        <span className={over ? "text-red-400" : "text-white"}>{current}g</span>
-        <span className="text-neutral-600"> / {goal}g</span>
-      </div>
-    </div>
-  )
 }

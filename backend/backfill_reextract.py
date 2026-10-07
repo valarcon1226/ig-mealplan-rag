@@ -13,6 +13,7 @@ Requiere sesión de Instagram válida. Uso (desde backend/):
 
     python backfill_reextract.py valarcon.zip --limit 3   # probar con 3
     python backfill_reextract.py valarcon.zip             # todas
+    python backfill_reextract.py valarcon.zip --redo-caption-only   # + las que no vieron el video
 
 Se puede cortar y volver a correr: salta las que ya tienen raw_text.
 """
@@ -29,14 +30,16 @@ from recipe_store import persist_recipe_to_sqlite
 PAUSE_SECONDS = 5  # Instagram + Gemini: ir lento evita el rate-limit
 
 
-def main(username: str, limit: int | None):
+def main(username: str, limit: int | None, redo_caption_only: bool = False):
     api_key = get_env_var("GEMINI_API_KEY")
     if not api_key:
         sys.exit("Falta GEMINI_API_KEY en backend/.env")
 
     db = SessionLocal()
     try:
-        pending = [(r.media_id, r.nombre) for r in db.query(Recipe).order_by(Recipe.id).all() if not r.raw_text]
+        # raw_text == caption: Gemini no pudo ver el video y se usó solo el texto del post.
+        pending = [(r.media_id, r.nombre) for r in db.query(Recipe).order_by(Recipe.id).all()
+                   if not r.raw_text or (redo_caption_only and r.caption and r.raw_text.strip() == r.caption.strip())]
     finally:
         db.close()
     if limit:
@@ -85,5 +88,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("username", help="usuario de Instagram con sesión guardada")
     parser.add_argument("--limit", type=int, help="procesar solo N recetas (para probar)")
+    parser.add_argument("--redo-caption-only", action="store_true",
+                        help="re-procesar también las que se hicieron solo con el caption (sin ver el video)")
     args = parser.parse_args()
-    main(args.username, args.limit)
+    main(args.username, args.limit, args.redo_caption_only)

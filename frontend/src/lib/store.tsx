@@ -25,6 +25,7 @@ type StoreContextType = {
   syncToCloud: () => Promise<void>;
   currentMealPlan: any | null;
   setCurrentMealPlan: (plan: any | null) => void;
+  planStart: string | null;
 };
 
 const defaultProfile: UserProfile = {
@@ -84,9 +85,15 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   const [currentMealPlan, setCurrentMealPlanState] = useState<any | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  // Day the plan was generated: plan day 1 = that date, so the Dashboard knows which day is today.
+  const [planStart, setPlanStart] = useState<string | null>(null);
+
   const setCurrentMealPlan = (plan: any | null) => {
     setCurrentMealPlanState(plan);
     set('app_mealplan', plan);
+    const start = plan ? today() : null;
+    setPlanStart(start);
+    set('app_mealplan_start', start);
   };
 
   const triggerSync = (currentProfile: UserProfile, currentRecipes: Recipe[]) => {
@@ -155,6 +162,10 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
       const storedPlan = await get('app_mealplan');
       if (storedPlan) {
         setCurrentMealPlanState(storedPlan);
+        // Plans saved before the start date existed begin today.
+        const storedStart = (await get('app_mealplan_start')) || today();
+        setPlanStart(storedStart);
+        set('app_mealplan_start', storedStart);
       }
       
       setIsLoading(false);
@@ -237,7 +248,7 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   const streakDays = computeStreak(eatLog);
 
   return (
-    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, markEaten, eatLog, logMeal, unlogMeal, streakDays, profile, updateProfile, dailyConsumption: todaysConsumption, updateDailyConsumption, folderPosts, setFolderPosts, isLoading, loadFromCloud, syncToCloud, currentMealPlan, setCurrentMealPlan }}>
+    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, markEaten, eatLog, logMeal, unlogMeal, streakDays, profile, updateProfile, dailyConsumption: todaysConsumption, updateDailyConsumption, folderPosts, setFolderPosts, isLoading, loadFromCloud, syncToCloud, currentMealPlan, setCurrentMealPlan, planStart }}>
       {children}
     </StoreContext.Provider>
   );

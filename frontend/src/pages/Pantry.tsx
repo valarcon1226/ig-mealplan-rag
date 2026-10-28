@@ -44,6 +44,7 @@ export default function Pantry() {
 type ScannedItem = { name: string; amount: string };
 
 function PantryInventory() {
+  const { authFetch } = useStore();
   const [items, setItems] = useState<any[]>([]);
   const [text, setText] = useState('');
   const [scanning, setScanning] = useState(false);
@@ -55,7 +56,7 @@ function PantryInventory() {
     setLoading(true);
     setLoadError(false);
     try {
-      const res = await fetch('/api/pantry');
+      const res = await authFetch('/api/pantry');
       const data = await res.json();
       if (!res.ok || !Array.isArray(data)) throw new Error();
       setItems(data);
@@ -70,7 +71,7 @@ function PantryInventory() {
 
   // amount '' lets the backend parse free text like "1lb de arroz".
   const addItem = async (itemName: string, itemAmount = '') => {
-    const res = await fetch('/api/pantry', {
+    const res = await authFetch('/api/pantry', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: itemName.trim(), amount: itemAmount.trim() })
@@ -110,7 +111,7 @@ function PantryInventory() {
         reader.onerror = () => reject(new Error('Could not read the file'));
         reader.readAsDataURL(file);
       });
-      const res = await fetch('/api/pantry/receipt', {
+      const res = await authFetch('/api/pantry/receipt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image })
@@ -142,7 +143,7 @@ function PantryInventory() {
 
   const handleDelete = async (id: number) => {
     try {
-      const res = await fetch(`/api/pantry/${id}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/pantry/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error();
       setItems(prev => prev.filter(i => i.id !== id));
     } catch {
@@ -253,6 +254,7 @@ const planMeals = (plan: any): any[] => !plan ? []
 
 // Checklist of what `meals` need vs. the pantry. Also used per recipe in the Cookbook.
 export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { meals: any[]; title?: string }) {
+  const { authFetch } = useStore();
   const [list, setList] = useState<GroceryItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -263,7 +265,7 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
   const fetchList = async () => {
     if (allMeals.length === 0) return;
     try {
-      const res = await fetch('/api/grocery/generate', {
+      const res = await authFetch('/api/grocery/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ meals: allMeals })
@@ -289,12 +291,12 @@ export function GroceryList({ meals: allMeals, title = 'Lista de mercado' }: { m
     setList(prev => prev.map(i => i.item === item.item ? { ...i, covered: !i.covered } : i));
     try {
       const res = item.covered
-        ? await fetch('/api/pantry/remove', {
+        ? await authFetch('/api/pantry/remove', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: item.item })
           })
-        : await fetch('/api/pantry', {
+        : await authFetch('/api/pantry', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: item.item, amount: item.missing || item.amount })

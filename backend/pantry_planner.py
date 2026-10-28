@@ -98,12 +98,15 @@ def _urgency(needs, pantry, expiry: Dict[str, int], day_index: int) -> int:
 
 
 def plan_from_pantry(db, meal_types: List[str], targets: Dict[str, float], restrictions: List[str],
-                     profile: Dict[str, Any], max_days: int = 7) -> Dict[str, Any]:
+                     profile: Dict[str, Any], max_days: int = 7, user_id: Optional[int] = None) -> Dict[str, Any]:
     planner = RAGMealPlanner(db)
     planner.avoid = [a for a in profile.get("avoid") or [] if a.strip()]
     planner.likes = [l for l in profile.get("likes") or [] if l.strip()]
 
-    items = db.query(PantryItem).all()
+    query = db.query(PantryItem)
+    if user_id is not None:
+        query = query.filter(PantryItem.user_id == user_id)
+    items = query.all()
     pantry = _load_pantry_lookup(items)
     # Días que le quedan a cada item (normalizado como en la despensa); el más corto si hay repetidos.
     expiry: Dict[str, int] = {}

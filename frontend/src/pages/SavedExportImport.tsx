@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Archive, Loader2, Upload } from 'lucide-react';
+import { useStore } from '../lib/store';
 
 type Summary = {
   total: number;
@@ -12,13 +13,14 @@ type Summary = {
 // Bulk import of saved posts from Instagram's official data export: the app never logs
 // into the account (logging in with instagrapi got the account flagged).
 export default function SavedExportImport() {
+  const { authFetch } = useStore();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [lastImport, setLastImport] = useState<{ leidos: number; nuevos: number } | null>(null);
 
   useEffect(() => {
-    fetch('/api/import/saved')
+    authFetch('/api/import/saved')
       .then(r => (r.ok ? r.json() : null))
       .then(d => d && setSummary(d))
       .catch(() => { /* backend down: the upload shows its own error */ });
@@ -41,7 +43,7 @@ export default function SavedExportImport() {
         reader.onerror = () => reject(new Error('No se pudo leer el archivo'));
         reader.readAsDataURL(file);
       });
-      const res = await fetch('/api/import/instagram-export', {
+      const res = await authFetch('/api/import/instagram-export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename: file.name, data_base64 }),

@@ -6,7 +6,8 @@ import { format, subDays } from 'date-fns';
 type AuthUser = { name: string; email: string };
 
 // Everything this browser keeps for the logged-in user; wiped on logout so the next person starts clean.
-const LOCAL_KEYS = ['app_token', 'app_recipes', 'app_profile', 'app_eat_log', 'app_daily', 'app_mealplan', 'app_mealplan_start'];
+// app_unsynced: edits made while the cloud copy wasn't loaded, so the next load must keep (and upload) them.
+const LOCAL_KEYS = ['app_token', 'app_user_email', 'app_unsynced', 'app_recipes', 'app_profile', 'app_eat_log', 'app_daily', 'app_mealplan', 'app_mealplan_start'];
 
 type StoreContextType = {
   recipes: Recipe[];
@@ -32,6 +33,7 @@ type StoreContextType = {
   currentMealPlan: any | null;
   setCurrentMealPlan: (plan: any | null) => void;
   planStart: string | null;
+  authFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 };
 
 const defaultProfile: UserProfile = {
@@ -117,19 +119,26 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   const loadFromCloud = async (authToken: string) => {
     try {
       const res = await fetch('/api/me/data', { headers: { Authorization: `Bearer ${authToken}` } });
-      if (res.status === 401) return resetSession();
+      if (res.status === 401) {
+        // Session gone: wipe only if nothing here is missing from the cloud; otherwise keep it for the next login.
+        if (!(await get('app_unsynced'))) return resetSession();
+        await del('app_token');
+        setToken(null); setUser(null);
+        return;
+      }
       if (!res.ok) return;
       const { user: u, data } = await res.json();
       setUser(u);
-      // No data yet (new account): keep what's in this browser; the sync effect uploads it.
-      if (data) {
+      set('app_user_email', u.email);
+      // No data yet (new account) or local edits not uploaded: keep this browser's copy; the sync effect uploads it.
+      if (data && !(await get('app_unsynced'))) {
         if (data.profile) { setProfile(data.profile); set('app_profile', data.profile); }
         setRecipes(normalizeRecipes(data.recipes || [])); set('app_recipes', data.recipes || []);
         setEatLog(data.eatLog || []); set('app_eat_log', data.eatLog || []);
       }
       setCloudReady(true);
     } catch (e) {
-      // ponytail: offline = local only until the next app load; add retry if devices go offline often.
+      // ponytail: offline = local only (flagged unsynced) until the next app load; add retry if devices go offline often.
       console.error('Failed to load from cloud', e);
     }
   };
@@ -138,6 +147,9 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'No se pudo conectar con el servidor');
+    // Another account was used in this browser: start clean so its local data isn't uploaded to this one.
+    const prevEmail = await get('app_user_email');
+    if (prevEmail && prevEmail !== data.user?.email) await resetSession();
     await set('app_token', data.token);
     setToken(data.token);
     setUser(data.user);
@@ -152,6 +164,14 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     await resetSession();
   };
 
+  const authFetch = (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers || {});
+    if (token && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+    return fetch(input, { ...init, headers });
+  };
+
   useEffect(() => {
     if (!token || !cloudReady) return;
     const t = setTimeout(() => {
@@ -159,10 +179,17 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ profile, recipes, eatLog }),
-      }).catch(err => console.error('Cloud sync failed:', err));
+      }).then(res => { if (res.ok) del('app_unsynced'); })
+        .catch(err => console.error('Cloud sync failed:', err));
     }, 1000);
     return () => clearTimeout(t);
   }, [token, cloudReady, profile, recipes, eatLog]);
+
+  // Edits while logged in but before the cloud copy loaded live only in this browser.
+  // isLoading is left out of the deps on purpose: finishing the initial load is not an edit.
+  useEffect(() => {
+    if (token && !cloudReady && !isLoading) set('app_unsynced', true);
+  }, [profile, recipes, eatLog]);
 
   useEffect(() => {
     const loadData = async () => {
@@ -279,7 +306,7 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   const streakDays = computeStreak(eatLog);
 
   return (
-    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, markEaten, eatLog, logMeal, unlogMeal, streakDays, profile, updateProfile, dailyConsumption: todaysConsumption, updateDailyConsumption, isLoading, token, user, login, register, logout, currentMealPlan, setCurrentMealPlan, planStart }}>
+    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, markEaten, eatLog, logMeal, unlogMeal, streakDays, profile, updateProfile, dailyConsumption: todaysConsumption, updateDailyConsumption, isLoading, token, user, login, register, logout, currentMealPlan, setCurrentMealPlan, planStart, authFetch }}>
       {children}
     </StoreContext.Provider>
   );

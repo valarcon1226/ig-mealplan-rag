@@ -793,25 +793,23 @@ def generate_mealplan(request: MealPlanRequest):
 
 
 @app.post("/api/mealplan/from-pantry")
-def generate_mealplan_from_pantry(request: MealPlanRequest):
+def generate_mealplan_from_pantry(request: MealPlanRequest, ctx=Depends(current_user)):
     """Plan día por día solo con lo que hay en la despensa (ver pantry_planner.py)."""
-    from database import SessionLocal
+    db, user, _ = ctx
     from pantry_planner import plan_from_pantry
     g = request.dailyGoals
     targets = {"calorias": g.get("calories", 2000), "proteinas": g.get("protein", 150),
                "carbohidratos": g.get("carbs", 200), "grasas": g.get("fat", 60),
                "azucares": g.get("sugar"), "fibra": g.get("fiber")}
-    db = SessionLocal()
     try:
         return plan_from_pantry(
             db, [m.lower() for m in request.meals], targets, request.restrictions,
             {"goal": request.goal, "is_pregnant": request.is_pregnant, "avoid": request.avoid, "likes": request.likes},
             max_days=max(1, min(14, request.num_days)),
+            user_id=user.id,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        db.close()
 
 
 class InstagramExportUpload(BaseModel):
@@ -819,11 +817,14 @@ class InstagramExportUpload(BaseModel):
     data_base64: str  # el ZIP (o JSON) de "Descargar tu información", como en el escaneo de boletas
 
 
-def _saved_summary(db) -> dict:
+def _saved_summary(db, user_id: int = None) -> dict:
     """Cuántos guardados hay por colección y estado (para la pantalla de importación)."""
     from collections import Counter
     from models import SavedImport
-    rows = db.query(SavedImport.collection, SavedImport.status).all()
+    q = db.query(SavedImport.collection, SavedImport.status)
+    if user_id is not None:
+        q = q.filter(SavedImport.user_id == user_id)
+    rows = q.all()
     by_col: dict = {}
     for col, status in rows:
         by_col.setdefault(col or "Sin colección", Counter())[status] += 1
@@ -836,14 +837,14 @@ def _saved_summary(db) -> dict:
 
 
 @app.post("/api/import/instagram-export")
-def import_instagram_export(body: InstagramExportUpload):
+def import_instagram_export(body: InstagramExportUpload, ctx=Depends(current_user)):
     """
     Importa en bloque los guardados desde la exportación oficial de Instagram, sin
     entrar a la cuenta. Quedan en la cola `saved_imports`; los que ya están en el
     recetario se marcan "en_recetario".
     """
     import base64
-    from database import SessionLocal
+    import zipfile
     from ig_export import parse_export, shortcode_to_pk
     from models import Recipe, SavedImport
 
@@ -852,37 +853,30 @@ def import_instagram_export(body: InstagramExportUpload):
     except (ValueError, KeyError, json.JSONDecodeError, zipfile.BadZipFile) as e:
         raise HTTPException(status_code=400, detail=f"No pude leer la exportación: {e}")
 
-    db = SessionLocal()
-    try:
-        # media_id de las recetas es "<pk>_<user>": con el pk se reconoce lo que ya está.
-        have_pks = {(m or "").split("_")[0] for (m,) in db.query(Recipe.media_id).all()}
-        existing = {s.shortcode: s for s in db.query(SavedImport).all()}
-        nuevos = 0
-        for p in posts:
-            row = existing.get(p["shortcode"])
-            if not row:
-                row = SavedImport(shortcode=p["shortcode"], url=p["url"], status="pendiente")
-                db.add(row)
-                nuevos += 1
-            row.username = p["username"] or row.username
-            row.collection = p["collection"] or row.collection
-            row.saved_at = p["saved_at"] or row.saved_at
-            if row.status == "pendiente" and shortcode_to_pk(p["shortcode"]) in have_pks:
-                row.status = "en_recetario"
-        db.commit()
-        return {"leidos": len(posts), "nuevos": nuevos, **_saved_summary(db)}
-    finally:
-        db.close()
+    db, user, _ = ctx
+    # media_id de las recetas es "<pk>_<user>": con el pk se reconoce lo que ya está.
+    have_pks = {(m or "").split("_")[0] for (m,) in db.query(Recipe.media_id).all()}
+    existing = {s.shortcode: s for s in db.query(SavedImport).filter(SavedImport.user_id == user.id).all()}
+    nuevos = 0
+    for p in posts:
+        row = existing.get(p["shortcode"])
+        if not row:
+            row = SavedImport(user_id=user.id, shortcode=p["shortcode"], url=p["url"], status="pendiente")
+            db.add(row)
+            nuevos += 1
+        row.username = p["username"] or row.username
+        row.collection = p["collection"] or row.collection
+        row.saved_at = p["saved_at"] or row.saved_at
+        if row.status == "pendiente" and shortcode_to_pk(p["shortcode"]) in have_pks:
+            row.status = "en_recetario"
+    db.commit()
+    return {"leidos": len(posts), "nuevos": nuevos, **_saved_summary(db, user_id=user.id)}
 
 
 @app.get("/api/import/saved")
-def get_saved_imports():
-    from database import SessionLocal
-    db = SessionLocal()
-    try:
-        return _saved_summary(db)
-    finally:
-        db.close()
+def get_saved_imports(ctx=Depends(current_user)):
+    db, user, _ = ctx
+    return _saved_summary(db, user_id=user.id)
 
 
 class MealPrepRequest(BaseModel):
@@ -908,34 +902,30 @@ class PantryItemCreate(BaseModel):
     amount: str = None
 
 @app.get("/api/pantry")
-def get_pantry():
-    from database import SessionLocal
+def get_pantry(ctx=Depends(current_user)):
+    db, user, _ = ctx
     from models import PantryItem
-    db = SessionLocal()
     from datetime import date
     from shelf_life import days_left
-    try:
-        items = db.query(PantryItem).all()
-        for i in items:
-            if not i.added_at:  # items de antes de guardar la fecha: se cuentan desde hoy
-                i.added_at = date.today().isoformat()
-        db.commit()
-        result = [{"id": i.id, "name": i.name, "amount": i.amount, "added_at": i.added_at,
-                   "days_left": days_left(i.name, i.added_at)} for i in items]
-        # Lo que vence primero, arriba.
-        return sorted(result, key=lambda r: r["days_left"])
-    finally:
-        db.close()
+    items = db.query(PantryItem).filter(PantryItem.user_id == user.id).all()
+    for i in items:
+        if not i.added_at:  # items de antes de guardar la fecha: se cuentan desde hoy
+            i.added_at = date.today().isoformat()
+    db.commit()
+    result = [{"id": i.id, "name": i.name, "amount": i.amount, "added_at": i.added_at,
+               "days_left": days_left(i.name, i.added_at)} for i in items]
+    # Lo que vence primero, arriba.
+    return sorted(result, key=lambda r: r["days_left"])
 
 @app.post("/api/pantry")
-def add_pantry_item(item: PantryItemCreate):
+def add_pantry_item(item: PantryItemCreate, ctx=Depends(current_user)):
     """
     Si ya existe un item con el mismo nombre (ej. al tildar un item de la
     grocery list dos semanas seguidas), suma la cantidad en vez de crear una
     fila duplicada - pero solo cuando ambas cantidades tienen la misma
     unidad; si no, no adivinamos la suma y se guarda como fila aparte.
     """
-    from database import SessionLocal
+    db, user, _ = ctx
     from models import PantryItem
     from ingredient_normalizer import parse_amount_str, normalize_ingredient_name
     from shopping_list import to_canonical, parse_free_text
@@ -949,45 +939,41 @@ def add_pantry_item(item: PantryItemCreate):
     if not name_clean:
         raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
 
-    db = SessionLocal()
-    try:
-        # "Huevos" y "huevo" son el mismo item; el pantry es chico, se recorre entero.
-        norm = normalize_ingredient_name(name_clean) or name_clean.lower()
-        existing = next((p for p in db.query(PantryItem).all()
-                         if (normalize_ingredient_name(p.name) or p.name.lower()) == norm), None)
+    # "Huevos" y "huevo" son el mismo item; el pantry es chico, se recorre entero.
+    norm = normalize_ingredient_name(name_clean) or name_clean.lower()
+    existing = next((p for p in db.query(PantryItem).filter(PantryItem.user_id == user.id).all()
+                     if (normalize_ingredient_name(p.name) or p.name.lower()) == norm), None)
 
-        if existing:
-            new_qty, new_unit = to_canonical(*parse_amount_str(str(item.amount or "")))
-            old_qty, old_unit = to_canonical(*parse_amount_str(str(existing.amount or "")))
-            if new_qty and old_qty and new_unit == old_unit:
-                total = old_qty + new_qty
-                existing.amount = f"{total:g} {new_unit}".strip()
-                db.commit()
-                db.refresh(existing)
-                return {"id": existing.id, "name": existing.name, "amount": existing.amount}
+    if existing:
+        new_qty, new_unit = to_canonical(*parse_amount_str(str(item.amount or "")))
+        old_qty, old_unit = to_canonical(*parse_amount_str(str(existing.amount or "")))
+        if new_qty and old_qty and new_unit == old_unit:
+            total = old_qty + new_qty
+            existing.amount = f"{total:g} {new_unit}".strip()
+            db.commit()
+            db.refresh(existing)
+            return {"id": existing.id, "name": existing.name, "amount": existing.amount}
 
-        from datetime import date
-        # Si se suma a un item existente se conserva su fecha (lo más viejo se daña primero).
-        new_item = PantryItem(name=name_clean, amount=item.amount, added_at=date.today().isoformat())
-        db.add(new_item)
-        db.commit()
-        db.refresh(new_item)
-        return {"id": new_item.id, "name": new_item.name, "amount": new_item.amount}
-    finally:
-        db.close()
+    from datetime import date
+    # Si se suma a un item existente se conserva su fecha (lo más viejo se daña primero).
+    new_item = PantryItem(user_id=user.id, name=name_clean, amount=item.amount, added_at=date.today().isoformat())
+    db.add(new_item)
+    db.commit()
+    db.refresh(new_item)
+    return {"id": new_item.id, "name": new_item.name, "amount": new_item.amount}
 
 class PantryRemoveByName(BaseModel):
     name: str
 
 @app.post("/api/pantry/remove")
-def remove_pantry_ingredient(item: PantryRemoveByName):
+def remove_pantry_ingredient(item: PantryRemoveByName, ctx=Depends(current_user)):
     """
     Al desmarcar un item de la grocery list ("no lo tengo"): borra ese
     ingrediente del pantry, con el mismo matching de nombre que usa la lista
     ("Huevos" == "huevo"). Restar solo lo necesario dejaría el item cubierto
     si había stock de sobra, y el check volvería a marcarse solo.
     """
-    from database import SessionLocal
+    db, user, _ = ctx
     from models import PantryItem
     from ingredient_normalizer import normalize_ingredient_name
 
@@ -995,16 +981,12 @@ def remove_pantry_ingredient(item: PantryRemoveByName):
     if not name_clean:
         raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
 
-    db = SessionLocal()
-    try:
-        norm = normalize_ingredient_name(name_clean) or name_clean.lower()
-        for p in db.query(PantryItem).all():
-            if (normalize_ingredient_name(p.name) or p.name.lower()) == norm:
-                db.delete(p)
-        db.commit()
-        return {"status": "ok"}
-    finally:
-        db.close()
+    norm = normalize_ingredient_name(name_clean) or name_clean.lower()
+    for p in db.query(PantryItem).filter(PantryItem.user_id == user.id).all():
+        if (normalize_ingredient_name(p.name) or p.name.lower()) == norm:
+            db.delete(p)
+    db.commit()
+    return {"status": "ok"}
 
 class ReceiptScanRequest(BaseModel):
     image: str  # data URL: "data:image/jpeg;base64,..."
@@ -1029,7 +1011,7 @@ RECEIPT_PROMPT = (
 )
 
 @app.post("/api/pantry/receipt")
-def scan_receipt(req: ReceiptScanRequest):
+def scan_receipt(req: ReceiptScanRequest, ctx=Depends(current_user)):
     """
     Lee una foto de un recibo con Gemini y devuelve los alimentos con nombre
     genérico (sin marca). NO guarda nada: el frontend muestra la lista para que
@@ -1061,39 +1043,34 @@ def scan_receipt(req: ReceiptScanRequest):
     return {"items": items}
 
 @app.delete("/api/pantry/{item_id}")
-def delete_pantry_item(item_id: int):
-    from database import SessionLocal
+def delete_pantry_item(item_id: int, ctx=Depends(current_user)):
+    db, user, _ = ctx
     from models import PantryItem
-    db = SessionLocal()
     item = db.query(PantryItem).filter(PantryItem.id == item_id).first()
-    if item:
-        db.delete(item)
-        db.commit()
-    db.close()
+    if not item or item.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Item no encontrado")
+    db.delete(item)
+    db.commit()
     return {"status": "ok"}
 
 class GroceryPlanRequest(BaseModel):
     meals: List[Dict]
 
 @app.post("/api/grocery/generate")
-def generate_grocery_list(req: GroceryPlanRequest):
+def generate_grocery_list(req: GroceryPlanRequest, ctx=Depends(current_user)):
     """
     Genera la lista de compras de forma determinística (sin LLM):
     1. Suma los ingredientes de TODAS las recetas del plan (día o semana).
     2. Resta lo que ya hay en el Pantry.
     3. Devuelve solo lo que falta, con la cantidad faltante exacta.
     """
-    from database import SessionLocal
+    db, user, _ = ctx
     from models import PantryItem
     from shopping_list import generate_shopping_list
 
-    db = SessionLocal()
-    try:
-        pantry_items = db.query(PantryItem).all()
-        grocery_list = generate_shopping_list(req.meals, pantry_items)
-        return {"grocery_list": grocery_list}
-    finally:
-        db.close()
+    pantry_items = db.query(PantryItem).filter(PantryItem.user_id == user.id).all()
+    grocery_list = generate_shopping_list(req.meals, pantry_items)
+    return {"grocery_list": grocery_list}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

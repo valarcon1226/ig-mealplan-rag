@@ -9,7 +9,7 @@ import { es } from 'date-fns/locale';
 import RecipeImage from '../lib/RecipeImage';
 
 export default function Planner() {
-  const { profile, recipes, setCurrentMealPlan, currentMealPlan, eatLog, logMeal, unlogMeal, planStart } = useStore();
+  const { profile, recipes, setCurrentMealPlan, currentMealPlan, eatLog, logMeal, unlogMeal, planStart, authFetch } = useStore();
   const [plan, setPlan] = useState<any>(currentMealPlan); // puede ser array o objeto
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -60,7 +60,8 @@ export default function Planner() {
     setShowModal(false);
     setPlanNote(null);
     try {
-      const res = await fetch(fromPantry ? '/api/mealplan/from-pantry' : '/api/mealplan/generate', {
+      const fetchFn = fromPantry ? authFetch : fetch;
+      const res = await fetchFn(fromPantry ? '/api/mealplan/from-pantry' : '/api/mealplan/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

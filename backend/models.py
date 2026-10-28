@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, Date
+from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, Date, Index
 from sqlalchemy.orm import relationship
 import datetime
 from database import Base
@@ -194,14 +194,10 @@ class PantryItem(Base):
     __tablename__ = "pantry_items"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=True)
     name = Column(String, index=True, nullable=False)
     amount = Column(String, nullable=True)
     added_at = Column(String, nullable=True)  # YYYY-MM-DD de compra: con shelf_life.py se sabe cuándo vence
-
-
-from database import ensure_columns
-ensure_columns("recipes", {"category": "VARCHAR", "raw_text": "TEXT", "structured_json": "TEXT"})
-ensure_columns("pantry_items", {"added_at": "VARCHAR"})
 
 
 class SavedImport(Base):
@@ -210,18 +206,18 @@ class SavedImport(Base):
     información" -> Guardado). Es la cola del import en bloque: nunca se entra a la cuenta.
     """
     __tablename__ = "saved_imports"
+    __table_args__ = (
+        Index("ix_saved_imports_user_id_shortcode", "user_id", "shortcode", unique=True),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
-    shortcode = Column(String, unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=True)
+    shortcode = Column(String, index=True, nullable=False)
     url = Column(String, nullable=False)
     username = Column(String, nullable=True)      # autor del post
     collection = Column(String, nullable=True)    # colección donde lo guardaste (None = sin colección)
     saved_at = Column(Integer, nullable=True)     # timestamp de cuándo lo guardaste
     status = Column(String, default="pendiente")  # pendiente | en_recetario | procesada | sin_acceso | no_es_receta
-
-
-from database import engine
-SavedImport.__table__.create(bind=engine, checkfirst=True)
 
 
 class User(Base):
@@ -245,5 +241,31 @@ class AuthSession(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
+from database import ensure_columns, engine
+from sqlalchemy import text
+
 User.__table__.create(bind=engine, checkfirst=True)
 AuthSession.__table__.create(bind=engine, checkfirst=True)
+SavedImport.__table__.create(bind=engine, checkfirst=True)
+PantryItem.__table__.create(bind=engine, checkfirst=True)
+
+ensure_columns("recipes", {"category": "VARCHAR", "raw_text": "TEXT", "structured_json": "TEXT"})
+ensure_columns("pantry_items", {"added_at": "VARCHAR", "user_id": "INTEGER"})
+ensure_columns("saved_imports", {"user_id": "INTEGER"})
+
+with engine.begin() as conn:
+    conn.execute(text("""
+        UPDATE pantry_items
+        SET user_id = (SELECT min(id) FROM users)
+        WHERE user_id IS NULL AND (SELECT min(id) FROM users) IS NOT NULL
+    """))
+    conn.execute(text("""
+        UPDATE saved_imports
+        SET user_id = (SELECT min(id) FROM users)
+        WHERE user_id IS NULL AND (SELECT min(id) FROM users) IS NOT NULL
+    """))
+    try:
+        conn.execute(text("DROP INDEX IF EXISTS ix_saved_imports_shortcode"))
+    except Exception:
+        pass
+    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_saved_imports_user_id_shortcode ON saved_imports (user_id, shortcode)"))

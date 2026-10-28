@@ -7,6 +7,7 @@ import { calculateMacros, getCyclePhase } from '../lib/macroCalculator';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
 import toast from 'react-hot-toast';
+import { get } from 'idb-keyval';
 
 export default function Profile() {
   const { profile, updateProfile, user, logout, dailyConsumption } = useStore();
@@ -32,6 +33,13 @@ export default function Profile() {
     const newProfile = { ...profile, ...updates };
     const newMacros = calculateMacros(newProfile);
     updateProfile({ ...updates, dailyGoals: newMacros });
+  };
+
+  // Logout wipes this browser's data, so warn when some edits never reached the cloud (store.tsx sets app_unsynced).
+  const handleLogout = async () => {
+    const unsynced = await get('app_unsynced').catch(() => false);
+    if (unsynced && !window.confirm('Hay cambios que todavía no se subieron a la nube. Si cierras sesión ahora se pierden. ¿Cerrar sesión igual?')) return;
+    logout();
   };
 
   const saveN8n = () => {
@@ -119,7 +127,7 @@ export default function Profile() {
               <div className="flex gap-2 pt-2">
                 <button type="button" onClick={() => setShowAccountModal(false)} className="flex-1 py-3 text-white text-sm font-bold bg-neutral-800 rounded-xl hover:bg-neutral-700 transition-colors">Done</button>
                 <button
-                  onClick={logout}
+                  onClick={handleLogout}
                   className="flex-1 bg-red-500/10 text-red-500 text-sm border border-red-500/20 font-bold rounded-xl py-3 hover:bg-red-500/20 transition-colors"
                 >
                   Cerrar sesión

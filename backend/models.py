@@ -54,6 +54,8 @@ class NutritionInformation(Base):
     carbohydrates = Column(Float, default=0.0)
     proteins = Column(Float, default=0.0)
     calories = Column(Float, default=0.0)
+    sugars = Column(Float, default=0.0, nullable=True)
+    fiber = Column(Float, default=0.0, nullable=True)
 
     # Relación uno-a-uno con Recipe
     recipe = relationship("Recipe", back_populates="nutrition", uselist=False)
@@ -75,7 +77,14 @@ class Recipe(Base):
     tags = Column(String, nullable=True) # Comma-separated tags
     instructions = Column(String, nullable=True) # JSON list of strings
     ingredients_raw = Column(String, nullable=True) # JSON string of ingredients
-    
+    cuisine_type = Column(String, nullable=True) # ej. "italiana", "mexicana", "asiática"
+    dificultad = Column(String, nullable=True) # "facil" | "media" | "dificil"
+    category = Column(String, nullable=True) # categoría de contenido (ensaladas, postres...), ver CATEGORIAS en langchain_pipeline.py
+    # Lo que el modelo vio/escuchó en el video + caption, y el JSON que se armó con eso.
+    # Guardarlos permite re-procesar (reprocess_recipes.py) sin volver a Instagram.
+    raw_text = Column(String, nullable=True)
+    structured_json = Column(String, nullable=True)
+
     nutrition_id = Column(Integer, ForeignKey("nutrition_information.id"), nullable=True)
     nutrition = relationship("NutritionInformation", back_populates="recipe")
 
@@ -161,3 +170,80 @@ class InventoryEntry(Base):
     
     food = relationship("Food", back_populates="inventory_entries")
     unit = relationship("Unit")
+
+class CollectionSyncState(Base):
+    """
+    Cuándo se sincronizó por última vez cada carpeta (colección) guardada
+    de Instagram. Se usa para no volver a pedirle datos a Instagram si ya
+    se sincronizó hace poco (TTL), y así reducir consumo/riesgo de rate
+    limit o challenges de seguridad.
+    """
+    __tablename__ = "collection_sync_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+    collection_id = Column(String, unique=True, index=True, nullable=False)
+    collection_name = Column(String, nullable=True)
+    last_synced_at = Column(DateTime, nullable=True)
+    posts_synced = Column(Integer, default=0)
+
+
+class PantryItem(Base):
+    """
+    Elemento en la Despensa (Pantry), texto libre
+    """
+    __tablename__ = "pantry_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True, nullable=False)
+    amount = Column(String, nullable=True)
+    added_at = Column(String, nullable=True)  # YYYY-MM-DD de compra: con shelf_life.py se sabe cuándo vence
+
+
+from database import ensure_columns
+ensure_columns("recipes", {"category": "VARCHAR", "raw_text": "TEXT", "structured_json": "TEXT"})
+ensure_columns("pantry_items", {"added_at": "VARCHAR"})
+
+
+class SavedImport(Base):
+    """
+    Un post guardado que vino de la exportación oficial de Instagram ("Descargar tu
+    información" -> Guardado). Es la cola del import en bloque: nunca se entra a la cuenta.
+    """
+    __tablename__ = "saved_imports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    shortcode = Column(String, unique=True, index=True, nullable=False)
+    url = Column(String, nullable=False)
+    username = Column(String, nullable=True)      # autor del post
+    collection = Column(String, nullable=True)    # colección donde lo guardaste (None = sin colección)
+    saved_at = Column(Integer, nullable=True)     # timestamp de cuándo lo guardaste
+    status = Column(String, default="pendiente")  # pendiente | en_recetario | procesada | sin_acceso | no_es_receta
+
+
+from database import engine
+SavedImport.__table__.create(bind=engine, checkfirst=True)
+
+
+class User(Base):
+    """Cuenta de la app. `data` guarda el perfil, el recetario y el registro de comidas (JSON)."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    password_hash = Column(String, nullable=False)  # "salt_hex$scrypt_hex"
+    data = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class AuthSession(Base):
+    """Token de sesión (uno por dispositivo con sesión iniciada)."""
+    __tablename__ = "auth_sessions"
+
+    token = Column(String, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+User.__table__.create(bind=engine, checkfirst=True)
+AuthSession.__table__.create(bind=engine, checkfirst=True)

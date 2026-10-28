@@ -16,7 +16,7 @@ El proyecto está dividido en dos partes principales (Frontend y Backend) que se
 ### B. Backend (Servidor Local de Python)
 - **Dónde vive:** Se ejecuta localmente en tu computadora usando **FastAPI**.
 - **Qué hace:** Es el "cerebro" real de la aplicación. Se encarga de iniciar sesión en Instagram de forma invisible, descargar tus posts guardados, procesar los videos/imágenes, y enviárselos a la Inteligencia Artificial (Gemini) para extraer los datos.
-- **Túnel (Ngrok):** Como el Frontend está en la nube de Google y el Backend en tu laptop (puerto `8001`), usamos **Ngrok** para crear un puente (ej. `https://xxx.ngrok-free.dev`) que permite que ambas partes hablen sin problemas de firewall.
+- **Túnel (Ngrok):** Como el Frontend está en la nube de Google y el Backend en tu laptop (puerto `8011`), usamos **Ngrok** para crear un puente (ej. `https://xxx.ngrok-free.dev`) que permite que ambas partes hablen sin problemas de firewall.
 
 ---
 

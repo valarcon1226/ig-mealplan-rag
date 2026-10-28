@@ -10,3 +10,34 @@ backend/recipes.db
 backend/recetas_saludables_backup.json
 .DS_Store
 backend/chroma_db/
+
+# Instagram session/auth tokens - never commit these
+ig_session*.json
+backend/ig_session*.json
+
+# Local job/state caches (regenerated at runtime)
+ig_jobs.json
+ig_state.json
+backend/ig_jobs.json
+backend/ig_state.json
+
+# Dev/test artifacts
+backend/test_video.mp4
+backend/static/thumbnails/
+
+# Local test/mock outputs
+uvicorn_test.log
+structured_meal_grocery.md
+backend/mock_plan_output.json
+backend/mock_search.py
+backend/meal_plan_7_days.md
+backend/generate_markdown.py
+
+# Servings/nutrition audit report (regenerated)
+backend/servings_audit.csv
+
+# Local data backups made by backfill/migration scripts
+*.bak-*
+frontend_dev.log
+backend/ig_scrapp.db.bak-*
+backend/*.log

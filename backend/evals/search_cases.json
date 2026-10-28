@@ -1,0 +1,14 @@
+[
+  {"q": "recetas con pollo", "filters": {"incluir_ingredientes": ["pollo/chicken"]}},
+  {"q": "cena rápida con pollo", "filters": {"tipo_comida": "cena", "max_tiempo_min": 20, "incluir_ingredientes": ["pollo/chicken"]}},
+  {"q": "postre sin azúcar", "filters": {"tipo_comida": "postre", "max_azucar": 5}},
+  {"q": "algo asiático alto en proteína", "filters": {"cocina": "asiatica", "min_proteina": 25}},
+  {"q": "comida china", "filters": {"cocina": "asiatica"}},
+  {"q": "pasta cremosa", "filters": {"texto_semantico": "pasta cremosa"}},
+  {"q": "almuerzo ligero sin cebolla", "filters": {"tipo_comida": "almuerzo", "max_calorias": 400, "excluir_ingredientes": ["cebolla/onion"]}},
+  {"q": "desayuno vegano", "filters": {"tipo_comida": "desayuno", "dietas": ["Vegano"]}},
+  {"q": "algo dulce para diabéticos", "filters": {"tipo_comida": "postre", "dietas": ["Apto Diabético"]}},
+  {"q": "snack crujiente sin gluten", "filters": {"tipo_comida": "snack", "dietas": ["Sin Gluten"], "texto_semantico": "crujiente"}},
+  {"q": "antojo asiatico con tofu para la cena con 500 calorias maximo y que no sea un sushi", "filters": {"cocina": "asiatica", "tipo_comida": "cena", "max_calorias": 500, "incluir_ingredientes": ["tofu"], "excluir_ingredientes": ["sushi"]}},
+  {"q": "antojo de pollo asiatico pero como que se sienta calientito y cozy y facil de hacer con pocos ingredientes para 1 persona", "filters": {"cocina": "asiatica", "incluir_ingredientes": ["pollo/chicken"], "texto_semantico": "calientito cozy facil"}}
+]

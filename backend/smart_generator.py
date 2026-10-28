@@ -23,7 +23,19 @@ class MealPlanGenerator:
             candidates = self.db.query(Recipe).filter(Recipe.nutrition_id != None).all()
             
         # Filtrar solo recetas que tengan info nutricional
-        valid_candidates = [r for r in candidates if r.nutrition]
+        valid_candidates = []
+        forbidden_words = ["polvo", "magnesio", "bebida", "electrolyte", "drink", "suplemento", "creatina", "queso cottage casero", "labneh"]
+        for r in candidates:
+            if not r.nutrition:
+                continue
+            
+            # Exclusion rules for snacks/drinks 
+            name_lower = r.nombre.lower() if r.nombre else ""
+            if any(fw in name_lower for fw in forbidden_words):
+                continue
+                
+            valid_candidates.append(r)
+            
         self.recipes_by_tag[tag] = valid_candidates
         return valid_candidates
 
@@ -96,12 +108,40 @@ class MealPlanGenerator:
         # Preparar respuesta
         meals_result = []
         for i, recipe in enumerate(best_combination):
+            ing_raw = []
+            if recipe.ingredients_raw:
+                try:
+                    import json
+                    ing_raw = json.loads(recipe.ingredients_raw)
+                except:
+                    pass
+                    
+            ing_mapped = []
+            for ing in ing_raw:
+                if isinstance(ing, dict):
+                    name = ing.get("nombre") or ing.get("ingrediente") or ing.get("item") or "Ingrediente"
+                    cantidad = str(ing.get("cantidad", "")) if ing.get("cantidad") is not None else ""
+                    unidad = str(ing.get("unidad", "")) if ing.get("unidad") is not None else ""
+                    ing_mapped.append({"name": name, "amount": f"{cantidad} {unidad}".strip()})
+                else:
+                    ing_mapped.append({"name": str(ing), "amount": ""})
+                    
+            instructions = []
+            if recipe.instructions:
+                try:
+                    import json
+                    instructions = json.loads(recipe.instructions)
+                except:
+                    pass
+
             meals_result.append({
                 "meal_type": meal_structure[i],
                 "recipe_id": recipe.id,
                 "nombre": recipe.nombre,
                 "calorias": recipe.nutrition.calories,
-                "proteinas": recipe.nutrition.proteins
+                "proteinas": recipe.nutrition.proteins,
+                "ingredients": ing_mapped,
+                "instructions": instructions
             })
 
         return {

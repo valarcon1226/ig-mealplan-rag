@@ -1,16 +1,26 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useStore } from '../lib/store';
-import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, ChevronLeft, ChevronRight } from 'lucide-react';
+import { planIdOf, mealMacros, dayEntries, todayPlanIndex } from '../lib/plan';
+import { Calendar as CalIcon, ShoppingBag, Send, FileDown, Loader2, Plus, ChevronLeft, ChevronRight, ChefHat, Check, RefreshCw, Utensils } from 'lucide-react';
 import { Recipe } from '../lib/types';
+import { addDays, differenceInCalendarDays, format } from 'date-fns';
+import { es } from 'date-fns/locale';
+import RecipeImage from '../lib/RecipeImage';
 
 export default function Planner() {
-  const { profile, recipes, updateDailyConsumption, dailyConsumption } = useStore();
-  const [plan, setPlan] = useState<any>(null); // puede ser array o objeto
+  const { profile, recipes, setCurrentMealPlan, currentMealPlan, eatLog, logMeal, unlogMeal, planStart } = useStore();
+  const [plan, setPlan] = useState<any>(currentMealPlan); // puede ser array o objeto
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
-  
-  const [planType, setPlanType] = useState<'daily' | 'weekly'>('daily');
-  const [currentDayIndex, setCurrentDayIndex] = useState(0);
+
+  const [numDays, setNumDays] = useState(1);
+  const [fromPantry, setFromPantry] = useState(false);
+  const [planNote, setPlanNote] = useState<string | null>(null);
+  // Both buttons open the same modal; the pantry one comes with "use only my pantry" checked.
+  const openGenerate = (pantry: boolean) => { setFromPantry(pantry); setShowModal(true); };
+  // Opens on today's plan day.
+  const [currentDayIndex, setCurrentDayIndex] = useState(() => todayPlanIndex(currentMealPlan, planStart));
 
   // Selecciones disponibles (con soporte para múltiples snacks)
   const mealOptions = [
@@ -24,6 +34,10 @@ export default function Planner() {
 
   const [selectedMealIds, setSelectedMealIds] = useState<string[]>(['desayuno', 'almuerzo', 'cena']);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
+  // Plan meal the open recipe / replacement picker belongs to ("<planId>:<day>:<meal>").
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [replaceKey, setReplaceKey] = useState<string | null>(null);
+  const [replaceQuery, setReplaceQuery] = useState('');
 
   const toggleMeal = (id: string) => {
     if (selectedMealIds.includes(id)) {
@@ -44,24 +58,42 @@ export default function Planner() {
 
     setLoading(true);
     setShowModal(false);
+    setPlanNote(null);
     try {
-      const res = await fetch('/api/mealplan/generate', {
+      const res = await fetch(fromPantry ? '/api/mealplan/from-pantry' : '/api/mealplan/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           dailyGoals: profile.dailyGoals,
           meals: mealsToSend,
-          plan_type: planType
+          num_days: numDays,
+          goal: profile.goal ?? 'maintain',
+          is_pregnant: !!profile.isPregnant,
+          restrictions: profile.dietaryRestrictions ?? [],
+          avoid: profile.avoidFoods ?? [],
+          likes: profile.favoriteFoods ?? [],
+          use_pantry: true // the normal plan also uses what's in the pantry first
         })
       });
       const data = await res.json();
       
       if (!res.ok) {
-        alert(data.error || "Failed to generate plan");
+        alert(data.detail || data.error || "Failed to generate plan");
         setPlan(null);
+        setCurrentMealPlan(null);
+      } else if (fromPantry) {
+        // Days that fit the pantry, plus "con lo que tienes alcanza para N días…".
+        setPlanNote(data.message);
+        if (data.plan.length) {
+          setPlan(data.plan);
+          setCurrentMealPlan(data.plan);
+          setCurrentDayIndex(0);
+        }
       } else {
         setPlan(data);
+        setCurrentMealPlan(data);
         setCurrentDayIndex(0);
+        setPlanNote('El plan usa primero lo que tienes en la despensa (lo que vence antes). Lo que falte está en tu lista de mercado.');
       }
     } catch (err) {
       console.error(err);
@@ -75,41 +107,65 @@ export default function Planner() {
     window.print();
   };
 
-  const openRecipeDetails = (meal: any) => {
-    const recipeToOpen = {
-      id: meal.recipe_id,
+  const openRecipeDetails = (meal: any, key: string) => {
+    setSelectedKey(key);
+    // The Cookbook copy has the current photo and category (the plan keeps what it had when generated).
+    const saved = recipes.find(r => r.id === String(meal.recipe_id));
+    const recipeToOpen: Recipe = {
+      id: String(meal.recipe_id),
       title: meal.nombre,
-      thumbnail_url: meal.thumbnail_url,
+      thumbnail_url: saved?.thumbnail_url || meal.thumbnail_url,
+      category: saved?.category,
       video_url: meal.video_url,
       ingredients: meal.ingredients || [],
       instructions: meal.instructions || [],
-      macros: {
-        calories: meal.calorias || 0,
-        protein: meal.proteinas || 0,
-        carbs: meal.carbohidratos || 0,
-        fat: meal.grasas || 0
-      },
-      servings: 1
+      macros: mealMacros(meal),
+      servings: 1,
+      categories: saved?.categories ?? [],
+      createdAt: Date.now()
     };
-    setSelectedRecipe(recipeToOpen as Recipe);
-  };
-
-  const eatRecipe = (recipe: Recipe) => {
-    updateDailyConsumption({
-      macros: {
-        calories: dailyConsumption.macros.calories + Math.round(recipe.macros.calories / recipe.servings),
-        protein: dailyConsumption.macros.protein + Math.round(recipe.macros.protein / recipe.servings),
-        carbs: dailyConsumption.macros.carbs + Math.round(recipe.macros.carbs / recipe.servings),
-        fat: dailyConsumption.macros.fat + Math.round(recipe.macros.fat / recipe.servings),
-        fiber: dailyConsumption.macros.fiber + Math.round(recipe.macros.fiber / recipe.servings),
-        sugar: dailyConsumption.macros.sugar + Math.round(recipe.macros.sugar / recipe.servings),
-      }
-    });
-    setSelectedRecipe(null);
+    setSelectedRecipe(recipeToOpen);
   };
 
   const isWeekly = Array.isArray(plan);
   const currentPlan = isWeekly ? plan[currentDayIndex] : plan;
+  const planId = planIdOf(plan);
+  const keyFor = (i: number) => `${planId}:${currentDayIndex}:${i}`;
+  const entryFor = (key: string) => eatLog.find(e => e.planKey === key);
+  const dayDone = dayEntries(eatLog, planId, currentDayIndex).length;
+  const dayMealCount = currentPlan?.meals?.length ?? 0;
+
+  const toggleEaten = (meal: any, key: string) => {
+    const entry = entryFor(key);
+    if (entry) unlogMeal(entry.id);
+    else logMeal({ title: meal.nombre, recipeId: String(meal.recipe_id), planKey: key, macros: mealMacros(meal) });
+  };
+
+  const replaceWith = (recipe: Recipe | null) => {
+    if (!replaceKey) return;
+    const prev = entryFor(replaceKey);
+    if (prev) unlogMeal(prev.id);
+    // null = "ate something else" that isn't in the Cookbook: counts as eaten, no macros/points.
+    logMeal(recipe
+      ? { title: recipe.title, recipeId: recipe.id, planKey: replaceKey, macros: recipe.macros }
+      : { title: 'Comí otra cosa', planKey: replaceKey });
+    setReplaceKey(null);
+    setReplaceQuery('');
+  };
+
+  // "Add 1 Serving" from a plan meal checks that meal; otherwise it's a plain log entry.
+  const eatRecipe = (recipe: Recipe) => {
+    if (selectedKey && !entryFor(selectedKey)) {
+      logMeal({ title: recipe.title, recipeId: recipe.id, planKey: selectedKey, macros: recipe.macros });
+    } else {
+      logMeal({ title: recipe.title, recipeId: recipe.id, macros: recipe.macros });
+    }
+    setSelectedRecipe(null);
+  };
+
+  const replaceOptions = recipes
+    .filter(r => r.title.toLowerCase().includes(replaceQuery.toLowerCase()))
+    .slice(0, 30);
 
   return (
     <div className="p-4 max-w-lg mx-auto space-y-6 pt-8 print:pt-0 pb-20 print:pb-0 relative">
@@ -123,20 +179,39 @@ export default function Planner() {
           <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-2xl w-full max-w-sm space-y-6">
             <h2 className="text-xl font-bold">Generate Plan</h2>
             
-            <div className="flex bg-black rounded-lg p-1 border border-neutral-800">
-              <button 
-                onClick={() => setPlanType('daily')}
-                className={`flex-1 py-2 rounded-md text-sm font-bold transition-colors ${planType === 'daily' ? 'bg-orange-500 text-black' : 'text-neutral-400 hover:text-white'}`}
-              >
-                Daily
-              </button>
-              <button 
-                onClick={() => setPlanType('weekly')}
-                className={`flex-1 py-2 rounded-md text-sm font-bold transition-colors ${planType === 'weekly' ? 'bg-orange-500 text-black' : 'text-neutral-400 hover:text-white'}`}
-              >
-                Weekly (7 Days)
-              </button>
+            <div>
+              <label className="text-xs font-bold text-neutral-400 block mb-2">¿Cuántos días quieres planear?</label>
+              <input
+                type="number"
+                min={1}
+                max={14}
+                value={numDays}
+                onChange={e => {
+                  const v = parseInt(e.target.value, 10);
+                  setNumDays(Number.isNaN(v) ? 1 : Math.max(1, Math.min(14, v)));
+                }}
+                className="w-full bg-black border border-neutral-800 rounded-lg px-3 py-3 text-sm text-white focus:border-orange-500 outline-none"
+              />
             </div>
+
+            {/* Both modes use the pantry first (soonest-to-expire first); they differ in what happens
+                with whatever is missing. */}
+            <fieldset className="space-y-2">
+              <legend className="text-xs font-bold text-neutral-400 mb-2">¿Qué hacemos con lo que falte?</legend>
+              {([
+                [false, 'Plan completo + lista de mercado', 'Usa primero lo que tienes (lo que vence antes va primero) y completa los días con otras recetas. Lo que falte queda en tu lista de mercado.'],
+                [true, 'Solo con lo que tengo', 'Arma únicamente los días que alcanzan con tu despensa (puede faltar algo chico) y te dice cuántos días te dura.'],
+              ] as const).map(([value, title, help]) => (
+                <label key={title} className={`flex items-start gap-3 p-3 bg-black rounded-lg border cursor-pointer ${fromPantry === value ? 'border-orange-500' : 'border-neutral-800'}`}>
+                  <input type="radio" name="pantry-mode" checked={fromPantry === value} onChange={() => setFromPantry(value)}
+                    className="w-5 h-5 mt-0.5 accent-orange-500" />
+                  <span>
+                    <span className="text-white font-medium block">{title}</span>
+                    <span className="text-xs text-neutral-500">{help}</span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
 
             <p className="text-sm text-neutral-400">Which meals do you want to include each day?</p>
             <div className="space-y-2 max-h-[40vh] overflow-y-auto">
@@ -161,24 +236,39 @@ export default function Planner() {
         </div>
       )}
 
+      {/* Pantry plan result: "con lo que tienes alcanza para N días…" (also when it's 0 and no plan shows) */}
+      {planNote && (
+        <div role="status" className="bg-orange-500/10 border border-orange-500/30 text-orange-200 rounded-xl p-3 text-sm flex items-start justify-between gap-3 print:hidden">
+          <span>{planNote}</span>
+          <Link to="/pantry?tab=grocery" className="shrink-0 text-orange-400 font-bold hover:text-orange-300">Ver lista de mercado →</Link>
+        </div>
+      )}
+
       {!plan ? (
         <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 text-center print:hidden">
           <CalIcon className="w-12 h-12 mx-auto text-orange-500 mb-4" />
           <h2 className="font-bold text-xl mb-2">Ready for the day?</h2>
           <p className="text-sm text-neutral-400 mb-6 pb-6 border-b border-neutral-800">Use your saved recipes to build a balanced, goal-oriented meal plan.</p>
           <button
-            onClick={() => setShowModal(true)}
+            onClick={() => openGenerate(false)}
             disabled={loading}
             className="w-full bg-orange-500 text-black font-bold py-3 rounded-xl flex items-center justify-center gap-2"
           >
             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : "Generate New Plan"}
+          </button>
+          <button
+            onClick={() => openGenerate(true)}
+            disabled={loading}
+            className="w-full mt-3 bg-neutral-950 border border-orange-500/40 text-orange-400 font-bold py-3 rounded-xl flex items-center justify-center gap-2"
+          >
+            <ShoppingBag className="w-4 h-4" aria-hidden="true" /> Planear con mi despensa
           </button>
         </div>
       ) : (
         <div className="space-y-6">
           <div className="flex justify-between items-center print:hidden">
             <h2 className="font-bold text-xl">
-              {isWeekly ? `Weekly Plan` : `Today's Plan`}
+              {isWeekly ? `Plan (${plan.length} días)` : `Today's Plan`}
             </h2>
             <div className="flex gap-2">
               <button onClick={printPdf} className="p-2 border border-neutral-800 rounded-lg hover:bg-neutral-900 text-neutral-400 hover:text-white"><FileDown className="w-4 h-4" /></button>
@@ -195,7 +285,7 @@ export default function Planner() {
                 <ChevronLeft className="w-5 h-5" />
               </button>
               <span className="font-bold text-white uppercase tracking-wider text-sm">
-                {["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"][currentDayIndex] || `Day ${currentDayIndex + 1}`}
+                {dayLabel(planStart, currentDayIndex)}
               </span>
               <button 
                 onClick={() => setCurrentDayIndex(prev => Math.min(plan.length - 1, prev + 1))}
@@ -209,48 +299,120 @@ export default function Planner() {
 
           {currentPlan && (
             <>
-              <div className="bg-neutral-900/50 p-4 rounded-xl border border-neutral-800/50">
-                <div className="flex justify-between items-center mb-2">
-                    <span className="text-neutral-400 text-sm">Fitness Score (Day {currentPlan.day || 1})</span>
-                    <span className="text-orange-500 font-bold">{Math.round(currentPlan.score)}</span>
-                </div>
-                <div className="grid grid-cols-4 gap-2 text-center text-xs">
-                    <div className="bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500 mb-1">Cals</div><div className="font-bold text-orange-400">{Math.round(currentPlan.totals.calorias)}</div></div>
-                    <div className="bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500 mb-1">Pro</div><div className="font-bold text-white">{Math.round(currentPlan.totals.proteinas)}g</div></div>
-                    <div className="bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500 mb-1">Carb</div><div className="font-bold text-white">{Math.round(currentPlan.totals.carbohidratos)}g</div></div>
-                    <div className="bg-black p-2 rounded border border-neutral-800"><div className="text-neutral-500 mb-1">Fat</div><div className="font-bold text-white">{Math.round(currentPlan.totals.grasas)}g</div></div>
-                </div>
+              {/* Detailed stats (real score, macros vs targets) live on the Dashboard ("Today"). */}
+              <div className="flex items-center justify-between text-xs text-neutral-500 px-1">
+                <span>
+                  <span className={dayDone === dayMealCount && dayMealCount > 0 ? 'text-green-400 font-bold' : 'text-white font-bold'}>{dayDone}/{dayMealCount}</span> comidas
+                  {' · '}{Math.round(currentPlan.totals.calorias)} kcal
+                </span>
+                <Link to="/" className="text-orange-400 hover:text-orange-300 print:hidden">Ver resumen →</Link>
               </div>
 
               <div className="space-y-4 print:text-black print:bg-white pb-4">
                 <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 print:border-gray-300 print:bg-white print:-mx-4">
                   <div className="space-y-4">
-                    {currentPlan.meals.map((meal: any, i: number) => (
-                      <div 
-                        key={i} 
-                        onClick={() => openRecipeDetails(meal)}
-                        className="flex gap-3 text-sm p-2 rounded-lg hover:bg-neutral-800 transition-colors cursor-pointer group"
-                      >
-                        <div className="w-20 shrink-0 text-orange-500 font-bold uppercase text-xs mt-1">{meal.meal_type}</div>
-                        <div>
-                            <div className="text-white group-hover:text-orange-400 transition-colors print:text-black font-medium">{meal.nombre}</div>
-                            <div className="text-neutral-500 text-xs mt-1">{meal.calorias} kcal · {meal.proteinas}g pro</div>
+                    {currentPlan.meals.map((meal: any, i: number) => {
+                      const key = keyFor(i);
+                      const entry = entryFor(key);
+                      const replaced = entry && entry.recipeId !== String(meal.recipe_id);
+                      return (
+                        <div key={i} className="flex gap-3 text-sm p-2 rounded-lg hover:bg-neutral-800 transition-colors group">
+                          <button
+                            onClick={() => toggleEaten(meal, key)}
+                            aria-pressed={!!entry}
+                            aria-label={entry ? `Desmarcar ${meal.meal_type}` : `Marcar ${meal.meal_type} como comido`}
+                            className={`w-6 h-6 mt-0.5 shrink-0 rounded-full border flex items-center justify-center print:hidden ${entry ? 'bg-green-500 border-green-500 text-black' : 'border-neutral-600 text-transparent hover:border-green-500'}`}
+                          >
+                            <Check className="w-4 h-4" />
+                          </button>
+                          <div className="w-20 shrink-0 text-orange-500 font-bold uppercase text-xs mt-1">{meal.meal_type}</div>
+                          <div className="flex-1 min-w-0 cursor-pointer" onClick={() => openRecipeDetails(meal, key)}>
+                            <div className={`group-hover:text-orange-400 transition-colors print:text-black font-medium ${replaced ? 'line-through text-neutral-500' : 'text-white'}`}>{meal.nombre}</div>
+                            {replaced && <div className="text-green-400 text-xs mt-0.5">→ {entry!.title}</div>}
+                            <div className="text-neutral-500 text-xs mt-1">{Math.round(meal.calorias)} kcal · {Math.round(meal.proteinas)}g pro</div>
+                            {meal.faltantes?.length > 0 && (
+                              <div className="text-yellow-500 text-xs mt-0.5">Te falta: {meal.faltantes.join(', ')}</div>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => setReplaceKey(key)}
+                            aria-label={`Cambiar ${meal.meal_type}: comí otra cosa`}
+                            title="Comí otra cosa"
+                            className="p-1.5 h-fit rounded-lg text-neutral-500 hover:text-white hover:bg-neutral-700 print:hidden"
+                          >
+                            <RefreshCw className="w-4 h-4" />
+                          </button>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               </div>
             </>
           )}
-          
-          <button
-            onClick={() => setShowModal(true)}
-            disabled={loading}
-            className="w-full bg-neutral-900 border border-neutral-800 py-3 rounded-xl print:hidden flex items-center justify-center gap-2 mt-4 text-xs font-bold text-neutral-400 uppercase tracking-widest"
+
+          <Link
+            to="/mealprep"
+            className="w-full bg-neutral-900 border border-orange-500/40 py-3 rounded-xl flex items-center justify-center gap-2 mt-4 text-xs font-bold text-orange-400 uppercase tracking-widest"
           >
-            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Regenerate Plan"}
-          </button>
+            <ChefHat className="w-4 h-4" /> Mealprep
+          </Link>
+
+          <div className="grid grid-cols-2 gap-2 mt-4 print:hidden">
+            <button
+              onClick={() => openGenerate(false)}
+              disabled={loading}
+              className="bg-neutral-900 border border-neutral-800 py-3 rounded-xl flex items-center justify-center gap-2 text-xs font-bold text-neutral-400 uppercase tracking-widest"
+            >
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Regenerate Plan"}
+            </button>
+            <button
+              onClick={() => openGenerate(true)}
+              disabled={loading}
+              className="bg-neutral-900 border border-orange-500/40 py-3 rounded-xl flex items-center justify-center gap-2 text-xs font-bold text-orange-400 uppercase tracking-widest"
+            >
+              <ShoppingBag className="w-4 h-4" aria-hidden="true" /> Con mi despensa
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: COMÍ OTRA COSA (reemplazo de una comida del plan) */}
+      {replaceKey && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-end sm:items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="replace-title">
+          <div className="bg-neutral-950 border border-neutral-800 w-full max-w-md rounded-3xl overflow-hidden shadow-2xl max-h-[80vh] flex flex-col">
+            <div className="p-4 border-b border-neutral-800">
+              <div className="flex justify-between items-center mb-3">
+                <h2 id="replace-title" className="text-lg font-bold text-white">¿Qué comiste en vez?</h2>
+                <button onClick={() => { setReplaceKey(null); setReplaceQuery(''); }} aria-label="Cerrar" className="text-neutral-500 hover:text-white p-2">✕</button>
+              </div>
+              <input
+                type="search"
+                autoFocus
+                value={replaceQuery}
+                onChange={e => setReplaceQuery(e.target.value)}
+                placeholder="Buscar en el Cookbook..."
+                aria-label="Buscar receta del Cookbook"
+                className="w-full bg-neutral-900 border border-neutral-800 text-white rounded-xl py-2 px-3 text-sm focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <ul className="overflow-y-auto flex-1 p-2">
+              {replaceOptions.map(r => (
+                <li key={r.id}>
+                  <button onClick={() => replaceWith(r)} className="w-full text-left p-3 rounded-lg hover:bg-neutral-800 text-sm">
+                    <div className="text-white">{r.title}</div>
+                    <div className="text-neutral-500 text-xs">{Math.round(r.macros.calories)} kcal · {Math.round(r.macros.protein)}g pro</div>
+                  </button>
+                </li>
+              ))}
+              {replaceOptions.length === 0 && <li className="p-3 text-sm text-neutral-500">No hay recetas con ese nombre.</li>}
+            </ul>
+            <div className="p-4 border-t border-neutral-800">
+              <button onClick={() => replaceWith(null)} className="w-full bg-neutral-900 border border-neutral-700 text-white py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2">
+                <Utensils className="w-4 h-4" /> No está en el Cookbook (no suma puntos)
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -264,19 +426,7 @@ export default function Planner() {
                 <button onClick={() => setSelectedRecipe(null)} className="text-neutral-500 hover:text-white p-2">✕</button>
               </div>
 
-              {(selectedRecipe.imageUrl || selectedRecipe.thumbnail_url) && (
-                <div className="w-full h-48 bg-neutral-900 rounded-xl mb-6 overflow-hidden relative">
-                  <img 
-                    src={selectedRecipe.imageUrl || selectedRecipe.thumbnail_url} 
-                    alt={selectedRecipe.title} 
-                    className="w-full h-full object-cover"
-                    referrerPolicy="no-referrer"
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).src = 'https://placehold.co/600x400/1a1a1a/4a4a4a?text=No+Image';
-                    }}
-                  />
-                </div>
-              )}
+              <RecipeImage key={selectedRecipe.id} recipe={selectedRecipe} className="h-48 mb-6" />
 
               <div className="grid grid-cols-4 gap-2 mb-8 bg-neutral-900 p-3 rounded-xl border border-neutral-800 text-center text-sm font-mono">
                 <div><div className="text-orange-500 font-bold">{selectedRecipe.macros?.calories || 0}</div><div className="text-[10px] text-neutral-500">kCal</div></div>
@@ -321,4 +471,13 @@ export default function Planner() {
 
     </div>
   );
+}
+
+// Real date of a plan day (day 1 = the day the plan was generated), e.g. "Hoy · miércoles 7 oct".
+function dayLabel(planStart: string | null, index: number): string {
+  if (!planStart) return `Día ${index + 1}`;
+  const date = addDays(new Date(`${planStart}T00:00`), index);
+  const name = format(date, "EEEE d MMM", { locale: es });
+  const rel = differenceInCalendarDays(date, new Date());
+  return rel === 0 ? `Hoy · ${name}` : rel === 1 ? `Mañana · ${name}` : rel === -1 ? `Ayer · ${name}` : name;
 }

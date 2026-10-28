@@ -1,28 +1,27 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../lib/store';
-import { Settings, RefreshCw, UserCircle, ActivitySquare, Link2, Calendar, HeartPulse } from 'lucide-react';
+import { Settings, RefreshCw, UserCircle, ActivitySquare, Link2, Calendar, HeartPulse, Leaf } from 'lucide-react';
+import { UserProfile } from '../lib/types';
+import { DIET_LABELS, splitList } from '../lib/diet';
 import { calculateMacros, getCyclePhase } from '../lib/macroCalculator';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
 import toast from 'react-hot-toast';
 
 export default function Profile() {
-  const { profile, updateProfile, loadFromCloud } = useStore();
+  const { profile, updateProfile, user, logout, dailyConsumption } = useStore();
+  // Same green -> red scale as the Dashboard sugar bar: nothing eaten = green, at/over the max = red.
+  const sugarToday = dailyConsumption.macros.sugar;
+  const sugarRatio = profile.dailyGoals.sugar > 0 ? Math.min(sugarToday / profile.dailyGoals.sugar, 1) : 0;
+  const sugarColor = `hsl(${Math.round(120 * (1 - sugarRatio))}, 75%, 50%)`;
   const [loading, setLoading] = useState(false);
   const [showStaticDataModal, setShowStaticDataModal] = useState(false);
   const [macroSuccess, setMacroSuccess] = useState(false);
   const [showHealthConnectModal, setShowHealthConnectModal] = useState(false);
   
   const [n8n, setN8n] = useState(profile.n8nWebhookUrl || '');
-  const [showIgModal, setShowIgModal] = useState(false);
-  const [showIgConnectionModal, setShowIgConnectionModal] = useState(false);
-  const [igFolders, setIgFolders] = useState<any[]>([]);
-  const [igFoldersLoading, setIgFoldersLoading] = useState(false);
-  const [igUsername, setIgUsername] = useState('');
-  const [igPassword, setIgPassword] = useState('');
-  const [igLoading, setIgLoading] = useState(false);
-  const [igError, setIgError] = useState('');
-  
+  const [showAccountModal, setShowAccountModal] = useState(false);
+
   const [showGarminModal, setShowGarminModal] = useState(false);
   const [showGarminConnectionModal, setShowGarminConnectionModal] = useState(false);
   const [garminUser, setGarminUser] = useState('');
@@ -39,29 +38,6 @@ export default function Profile() {
     updateProfile({ n8nWebhookUrl: n8n });
     toast.success("Saved");
   }
-
-  const handleIgLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIgError('');
-    if (!igUsername) {
-      setIgError("Please enter your username");
-      return;
-    }
-    
-    setIgLoading(true);
-    try {
-      // BYPASS: Usar sesión local existente sin validar con el backend
-      localStorage.setItem('ig_username', igUsername);
-      localStorage.setItem('ig_password', igPassword || 'dummy');
-      updateProfile({ instagramApiKey: JSON.stringify({ username: igUsername, password: igPassword || 'dummy' }) });
-      await loadFromCloud(igUsername);
-      setShowIgModal(false);
-    } catch (e) {
-       setIgError("Network error. Please try again later.");
-    } finally {
-      setIgLoading(false);
-    }
-  };
 
   const handleGarminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,50 +69,6 @@ export default function Profile() {
     }
   };
 
-  const handleFetchFolders = async () => {
-    if (!profile.instagramApiKey) return;
-    setIgFoldersLoading(true);
-    setIgFolders([]);
-    try {
-      const igCreds = JSON.parse(profile.instagramApiKey || '{}');
-      const res = await fetch('/api/collections', { 
-        method: 'GET',
-        headers: { 
-          'X-IG-Username': localStorage.getItem('ig_username') || igCreds.username || '',
-          'X-IG-Password': localStorage.getItem('ig_password') || igCreds.password || '',
-          'ngrok-skip-browser-warning': 'true'
-        }
-      });
-      const data = await res.json();
-      let fetchedFolders: any[] = [];
-      if (Array.isArray(data)) {
-        fetchedFolders = data;
-      } else if (data.collections) {
-         fetchedFolders = data.collections;
-      } else if (data.folders) {
-         fetchedFolders = data.folders;
-      } else {
-         throw new Error(data.error || "Webhook did not return correctly.");
-      }
-      setIgFolders(fetchedFolders);
-      updateProfile({ igFolders: fetchedFolders });
-      toast.success("Folders synced!");
-    } catch (err: any) {
-      toast.error(err.message || 'Error fetching folders.');
-    } finally {
-      setIgFoldersLoading(false);
-    }
-  };
-
-  const igUserLabel = (() => {
-    try {
-       const keyData = JSON.parse(profile.instagramApiKey || '{}');
-       return keyData.username || 'IG User';
-    } catch {
-       return profile.instagramApiKey ? 'IG User' : '';
-    }
-  })();
-
   return (
     <div className="p-4 max-w-lg mx-auto space-y-8 pt-8 pb-20">
       <header className="flex justify-between items-start mb-2">
@@ -152,68 +84,18 @@ export default function Profile() {
             >
               <HeartPulse className="w-3.5 h-3.5" /> Health Connect
             </button>
-            {!profile.instagramApiKey ? (
-              <button 
-                onClick={() => setShowIgModal(true)}
-                className="bg-gradient-to-tr from-pink-500 via-red-500 to-orange-500 text-white text-xs font-bold px-4 py-2 rounded-xl shadow-lg hover:opacity-90 transition-opacity"
-              >
-                Connect IG
-              </button>
-            ) : (
-              <button 
-                onClick={() => setShowIgConnectionModal(true)}
-                className="bg-green-500/10 hover:bg-green-500/20 text-green-400 border border-green-500/20 text-xs font-bold px-4 py-2 rounded-xl transition-colors cursor-pointer"
-              >
-                IG Connected
-              </button>
-            )}
+            <button
+              onClick={() => setShowAccountModal(true)}
+              className="bg-green-500/10 hover:bg-green-500/20 text-green-400 border border-green-500/20 text-xs font-bold px-4 py-2 rounded-xl transition-colors cursor-pointer"
+            >
+              {user?.name || 'Mi cuenta'}
+            </button>
           </div>
         </div>
       </header>
 
-      {/* IG Modal */}
-      {showIgModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl w-full max-w-sm shadow-2xl relative overflow-hidden">
-            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-pink-500 via-red-500 to-orange-500"></div>
-            <h3 className="text-xl font-bold mb-4 text-white mt-2">Instagram Login</h3>
-            
-            <form onSubmit={handleIgLogin} className="space-y-4">
-              {igError && (
-                <div className="bg-red-500/10 border border-red-500/20 text-red-500 text-xs px-4 py-3 rounded-xl mb-4">
-                  {igError}
-                </div>
-              )}
-              <input 
-                type="text" 
-                value={igUsername}
-                onChange={e => setIgUsername(e.target.value)}
-                placeholder="Username" 
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-sm outline-none text-white focus:border-pink-500 transition-colors"
-                required
-              />
-              <input 
-                type="password" 
-                value={igPassword}
-                onChange={e => setIgPassword(e.target.value)}
-                placeholder="Password" 
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-sm outline-none text-white focus:border-pink-500 transition-colors"
-                required
-              />
-              
-              <div className="flex gap-2 pt-4">
-                <button type="button" onClick={() => setShowIgModal(false)} className="flex-1 py-3 bg-neutral-800 hover:bg-neutral-700 rounded-xl text-white text-sm font-bold transition-colors">Cancel</button>
-                <button type="submit" disabled={igLoading} className="flex-1 bg-gradient-to-r from-pink-500 to-orange-500 hover:opacity-90 rounded-xl text-white text-sm font-bold transition-opacity">
-                  {igLoading ? "Connecting..." : "Login"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* IG Connected Details Modal */}
-      {showIgConnectionModal && (
+      {/* Account Modal */}
+      {showAccountModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
           <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl w-full max-w-sm shadow-2xl relative overflow-hidden">
             {/* Background design */}
@@ -225,52 +107,22 @@ export default function Profile() {
                   <UserCircle className="w-12 h-12 text-neutral-500" />
                 </div>
               </div>
-              <h3 className="text-xl font-bold text-white">{igUserLabel}</h3>
+              <h3 className="text-xl font-bold text-white">{user?.name}</h3>
+              <p className="text-sm text-neutral-400">{user?.email}</p>
               <p className="text-sm text-neutral-400 flex items-center gap-1 mt-1">
                 <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                Connected
+                Datos sincronizados
               </p>
             </div>
 
             <div className="space-y-3">
-                <div className="bg-neutral-950 p-4 rounded-xl border border-neutral-800">
-                  <div className="flex justify-between items-center mb-2">
-                    <p className="text-xs font-bold text-neutral-400 uppercase tracking-wider">Your Folders</p>
-                    <button onClick={handleFetchFolders} className="text-xs text-orange-500 font-bold hover:text-orange-400 transition-colors bg-orange-500/10 px-2 py-1 rounded">
-                      {igFoldersLoading ? "Syncing..." : "Sync Folders"}
-                    </button>
-                  </div>
-                  {igFoldersLoading ? (
-                    <div className="flex justify-center py-4">
-                      <RefreshCw className="w-5 h-5 text-neutral-500 animate-spin" />
-                    </div>
-                  ) : igFolders.length > 0 ? (
-                    <ul className="text-sm text-white space-y-2 mt-3 max-h-40 overflow-y-auto pr-2 custom-scrollbar">
-                      {igFolders.map((f, i) => (
-                        <li key={i} className="flex items-center justify-between p-2 rounded-lg bg-neutral-900/50 border border-neutral-800/50">
-                          <span className="font-medium truncate">{typeof f === 'string' ? f : f.name || f.id}</span>
-                          {f.media_count !== undefined && (
-                            <span className="text-[10px] bg-neutral-800 px-2 py-1 rounded-md text-neutral-400 font-bold">{f.media_count}</span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-xs text-neutral-500 italic mt-2 py-2 text-center bg-neutral-900/30 rounded-lg">Click sync to fetch folders.</p>
-                  )}
-                </div>
-              
               <div className="flex gap-2 pt-2">
-                <button type="button" onClick={() => setShowIgConnectionModal(false)} className="flex-1 py-3 text-white text-sm font-bold bg-neutral-800 rounded-xl hover:bg-neutral-700 transition-colors">Done</button>
-                <button 
-                  onClick={() => {
-                    updateProfile({ instagramApiKey: undefined, igSyncWebhookUrl: undefined, igFolders: undefined });
-                    setShowIgConnectionModal(false);
-                    setIgFolders([]);
-                  }} 
+                <button type="button" onClick={() => setShowAccountModal(false)} className="flex-1 py-3 text-white text-sm font-bold bg-neutral-800 rounded-xl hover:bg-neutral-700 transition-colors">Done</button>
+                <button
+                  onClick={logout}
                   className="flex-1 bg-red-500/10 text-red-500 text-sm border border-red-500/20 font-bold rounded-xl py-3 hover:bg-red-500/20 transition-colors"
                 >
-                  Logout
+                  Cerrar sesión
                 </button>
               </div>
             </div>
@@ -327,7 +179,7 @@ export default function Profile() {
               <h3 className="text-xl font-bold text-white">{profile.garminCredentials?.displayName || profile.garminCredentials?.user || 'Garmin User'}</h3>
               <p className="text-sm text-neutral-400 flex items-center gap-1 mt-1">
                 <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
-                Connected
+                Datos sincronizados
               </p>
             </div>
 
@@ -341,7 +193,7 @@ export default function Profile() {
                   }} 
                   className="flex-1 bg-red-500/10 text-red-500 text-sm border border-red-500/20 font-bold rounded-xl py-3 hover:bg-red-500/20 transition-colors"
                 >
-                  Logout
+                  Cerrar sesión
                 </button>
               </div>
             </div>
@@ -384,11 +236,30 @@ export default function Profile() {
 
         <div className="bg-neutral-950 p-4 rounded-xl border border-neutral-800 shadow-inner">
           <p className="text-xs text-neutral-500 uppercase tracking-wider mb-3 text-center">Calculated Daily Intake</p>
-          <div className="grid grid-cols-4 gap-2 text-center">
-             <div><div className="text-orange-500 font-bold text-xl">{profile.dailyGoals.calories}</div><div className="text-[10px] text-neutral-500 mt-1">KCAL</div></div>
-             <div><div className="text-white font-bold text-xl">{profile.dailyGoals.protein}g</div><div className="text-[10px] text-neutral-500 mt-1">PRO</div></div>
-             <div><div className="text-white font-bold text-xl">{profile.dailyGoals.carbs}g</div><div className="text-[10px] text-neutral-500 mt-1">CARB</div></div>
-             <div><div className="text-white font-bold text-xl">{profile.dailyGoals.fat}g</div><div className="text-[10px] text-neutral-500 mt-1">FAT</div></div>
+          {/* Calories big on the left; macros in a 3+2 grid. Sugar is the only live value: today's
+              intake against the max, green (none yet) -> red (at or over the max). */}
+          <div className="flex gap-2 text-center">
+            <div className="w-1/3 shrink-0 p-3 flex flex-col items-center justify-center">
+              <div className="text-3xl font-bold text-orange-500 leading-none">{Math.round(profile.dailyGoals.calories)}</div>
+              <div className="text-[10px] text-neutral-500 mt-1">KCAL</div>
+            </div>
+            <div className="flex-1 grid grid-cols-6 gap-2">
+              {([['protein', 'PRO'], ['carbs', 'CARB'], ['fat', 'FAT']] as const).map(([k, label]) => (
+                <div key={k} className="col-span-2 p-2">
+                  <div className="text-white font-bold text-lg">{Math.round(profile.dailyGoals[k])}g</div>
+                  <div className="text-[10px] text-neutral-500">{label}</div>
+                </div>
+              ))}
+              <div className="col-span-3 p-2">
+                <div className="text-white font-bold text-lg">{Math.round(profile.dailyGoals.fiber)}g</div>
+                <div className="text-[10px] text-neutral-500">FIBRA (MÍN)</div>
+              </div>
+              <div className="col-span-3 p-2">
+                {/* The target; its color shows how much of it today's meals already used. */}
+                <div className="font-bold text-lg" style={{ color: sugarColor }}>{Math.round(profile.dailyGoals.sugar)}g</div>
+                <div className="text-[10px] text-neutral-500">AZÚCAR</div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -463,6 +334,8 @@ export default function Profile() {
         </div>
       )}
 
+      <DietPreferences profile={profile} updateProfile={updateProfile} />
+
       {/* Cycle Sync & Pregnancy */}
       <section className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6">
         <div className="flex justify-between items-center mb-4">
@@ -527,6 +400,8 @@ export default function Profile() {
                          className="w-full bg-neutral-950 border border-neutral-800 rounded-lg pl-10 pr-3 py-3 text-sm outline-none text-white focus:border-orange-500 cursor-pointer"
                          placeholderText="Due Date"
                          minDate={new Date()}
+                         popperPlacement="bottom-start"
+                         popperModifiers={[{ name: "flip", options: { fallbackPlacements: [] } } as any]}
                        />
                      </div>
                    </div>
@@ -573,6 +448,8 @@ export default function Profile() {
                         className="w-full bg-neutral-950 border border-neutral-800 rounded-lg pl-10 pr-3 py-3 text-sm outline-none text-white focus:border-orange-500 cursor-pointer"
                         placeholderText="Select a date"
                         maxDate={new Date()}
+                        popperPlacement="bottom-start"
+                        popperModifiers={[{ name: "flip", options: { fallbackPlacements: [] } } as any]}
                       />
                     </div>
                   </div>
@@ -665,6 +542,63 @@ export default function Profile() {
         </div>
       )}
     </div>
+  );
+}
+
+// Diet restrictions (hard filter) + foods to avoid (hard) + favorite foods (prioritized).
+// Used by the Cookbook filters and the meal planner.
+function DietPreferences({ profile, updateProfile }: { profile: UserProfile; updateProfile: (u: Partial<UserProfile>) => void }) {
+  const restrictions = profile.dietaryRestrictions ?? [];
+  const [avoid, setAvoid] = useState((profile.avoidFoods ?? []).join(', '));
+  const [likes, setLikes] = useState((profile.favoriteFoods ?? []).join(', '));
+
+  const toggle = (label: string) => updateProfile({
+    dietaryRestrictions: restrictions.includes(label) ? restrictions.filter(r => r !== label) : [...restrictions, label],
+  });
+
+  const inputClass = "w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:border-orange-500 outline-none transition-colors";
+
+  return (
+    <section className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 space-y-5">
+      <div>
+        <h2 className="font-bold text-lg flex items-center gap-2"><Leaf className="w-5 h-5 text-orange-500" /> Diet & Preferences</h2>
+        <p className="text-xs text-neutral-500 mt-1">Recipes and meal plans only show what fits you.</p>
+      </div>
+
+      <fieldset>
+        <legend className="text-xs text-neutral-500 uppercase tracking-wider mb-2">Dietary restrictions</legend>
+        <div className="flex flex-wrap gap-2">
+          {DIET_LABELS.map(label => {
+            const on = restrictions.includes(label);
+            return (
+              <button key={label} type="button" onClick={() => toggle(label)} aria-pressed={on}
+                className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-colors ${on ? 'bg-orange-500 border-orange-500 text-black' : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white'}`}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {restrictions.includes('Apto Diabético') && (
+          <p className="text-[11px] text-neutral-500 mt-2">Apto Diabético = máx. 10 g de azúcar por porción. Consulta tu plan con tu médico.</p>
+        )}
+      </fieldset>
+
+      <div className="space-y-1">
+        <label htmlFor="avoid-foods" className="text-xs text-neutral-500 uppercase tracking-wider">Don't eat / allergies</label>
+        <input id="avoid-foods" value={avoid} onChange={e => setAvoid(e.target.value)}
+          onBlur={() => updateProfile({ avoidFoods: splitList(avoid) })}
+          placeholder="e.g. cilantro, champiñones, atún" className={inputClass} />
+        <p className="text-[11px] text-neutral-600">Separated by commas. Recipes with these are hidden.</p>
+      </div>
+
+      <div className="space-y-1">
+        <label htmlFor="favorite-foods" className="text-xs text-neutral-500 uppercase tracking-wider">Foods you love</label>
+        <input id="favorite-foods" value={likes} onChange={e => setLikes(e.target.value)}
+          onBlur={() => updateProfile({ favoriteFoods: splitList(likes) })}
+          placeholder="e.g. pasta, pollo, mexicana, chocolate" className={inputClass} />
+        <p className="text-[11px] text-neutral-600">Separated by commas. These show up first.</p>
+      </div>
+    </section>
   );
 }
 

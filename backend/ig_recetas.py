@@ -1,17 +1,21 @@
 import os
 import re
 import json
+import hmac
+import hashlib
+import secrets
+import zipfile
 import time
 import tempfile
 import threading
 import requests as req_lib
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Dict
-from instagrapi import Client
-from instagrapi.exceptions import LoginRequired, ChallengeRequired
+from typing import List, Dict, Literal
+
+from ig_media import download_media, download_bytes, MediaDownloadError  # descargas por URL, sin sesión de Instagram
 
 # LangChain pipeline (import opcional — solo falla si no está instalado)
 try:
@@ -20,7 +24,6 @@ try:
 except ImportError:
     LANGCHAIN_AVAILABLE = False
 
-SESSION_FILE = "ig_session.json"
 app = FastAPI(title="Backend para Recetas de IG")
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -86,221 +89,9 @@ def _gemini_post(url, payload, timeout=60, max_retries=4):
         return resp
 # No global client - instantiated dynamically per user
 
-RECIPE_KEYWORDS = [
-    "ingredientes", "ingredients", "receta", "recipe", "taza", "cup", "tbsp",
-    "tsp", "cucharada", "cucharadita", "gramos", "grams", "oz", "lb",
-    "horno", "oven", "mezcla", "mix", "bake", "hornea", "fríe", "fry",
-    "hervir", "boil", "picar", "chop", "sal", "salt", "aceite", "oil",
-]
-
-def extract_media(item: dict) -> dict:
-    media = item.get("media", item)
-    video_url = None
-    if media.get("video_versions"):
-        video_url = media["video_versions"][0].get("url")
-    thumb_url = None
-    if media.get("image_versions2", {}).get("candidates"):
-        thumb_url = media["image_versions2"]["candidates"][0].get("url")
-    caption = media.get("caption", {}).get("text", "") if media.get("caption") else ""
-    caption_lower = caption.lower()
-    has_recipe_caption = any(kw in caption_lower for kw in RECIPE_KEYWORDS)
-
-    return {
-        "media_id": str(media.get("id", "")),
-        "url": video_url or thumb_url or "",
-        "caption": caption,
-        "media_type": "video" if video_url else "image",
-        "taken_at": media.get("taken_at"),
-        "has_recipe_caption": has_recipe_caption,
-        "workflow": "A_caption" if has_recipe_caption else "B_whisper",
-    }
-
-
-def get_client_for_user(username: str = None, password: str = None) -> Client:
-    if not username:
-        username = os.environ.get("IG_USERNAME")
-    if not password:
-        password = os.environ.get("IG_PASSWORD")
-        
-    if not username:
-        raise HTTPException(status_code=400, detail="Debes definir el usuario de Instagram (vía headers X-IG-Username o variables de entorno).")
-        
-    user_cl = Client()
-    session_path = f"ig_session_{username}.json"
-    
-    if os.path.exists(session_path):
-        user_cl.load_settings(session_path)
-        return user_cl
-            
-    if not password:
-        raise HTTPException(status_code=401, detail=f"Sesión no iniciada o expirada para {username}, y no se proporcionó contraseña.")
-        
-    try:
-        user_cl.login(username, password)
-        user_cl.dump_settings(session_path)
-        return user_cl
-    except (LoginRequired, ChallengeRequired) as e:
-        raise HTTPException(status_code=401, detail=f"Autenticación de Instagram requerida para {username}: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al iniciar sesión en Instagram para {username}: {str(e)}")
-
-
 @app.on_event("startup")
 def startup():
     load_jobs()
-    # Intentar cargar el cliente por defecto si existen variables de entorno
-    try:
-        get_client_for_user()
-    except Exception:
-        pass
-
-
-@app.post("/login")
-def login_endpoint(
-    x_ig_username: str = Header(None),
-    x_ig_password: str = Header(None)
-):
-    if x_ig_username == "test" and x_ig_password == "test":
-        return {"status": "success", "message": "Sesión iniciada correctamente para test"}
-        
-    user_cl = get_client_for_user(x_ig_username, x_ig_password)
-    return {"status": "success", "message": f"Sesión iniciada correctamente para {x_ig_username or os.environ.get('IG_USERNAME')}"}
-
-
-@app.get("/collections")
-def list_collections(
-    x_ig_username: str = Header(None),
-    x_ig_password: str = Header(None)
-):
-    if x_ig_username == "test":
-        return {"total": 1, "collections": [{"collection_id": "test_folder", "name": "recetas saludables", "media_count": 10}]}
-    return {"total": 1, "collections": [{"collection_id": "backup_collection", "name": "Recetas Saludables (Backup)", "media_count": 1}]}
-
-
-STATE_FILE = "ig_state.json"
-
-def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_state(state: dict):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
-
-@app.get("/collection-posts")
-def get_collection_posts(
-    collection_id: str,
-    batch_size: int = 20,
-    cursor: str = None,
-    since: int = None,
-    x_ig_username: str = Header(None),
-    x_ig_password: str = Header(None)
-):
-    import json
-    with open("recetas_saludables_backup.json", "r", encoding="utf-8-sig") as f:
-        data = json.load(f)
-    all_posts = data.get("posts", [])
-    
-    try:
-        from database import SessionLocal
-        from models import Recipe
-        db = SessionLocal()
-        # IDs of recipes already in SQLite DB
-        analyzed_ids = {r.media_id for r in db.query(Recipe).all()}
-        db.close()
-    except Exception as e:
-        print(f"Error reading SQLite: {e}")
-        analyzed_ids = set()
-        
-    unanalyzed = [p for p in all_posts if p.get("media_id") not in analyzed_ids]
-    # Retornamos 2 para la prueba que pide el usuario
-    posts_to_return = unanalyzed[:2]
-    
-    return {
-        "batch_total": len(posts_to_return),
-        "workflow_a_count": len(posts_to_return),
-        "workflow_b_count": 0,
-        "next_cursor": None,
-        "has_more": False,
-        "posts": posts_to_return
-    }
-
-
-@app.get("/collection-posts/all")
-def get_all_collection_posts(
-    collection_id: str, 
-    since: int = 0,
-    x_ig_username: str = Header(None),
-    x_ig_password: str = Header(None)
-):
-    import json
-    with open("recetas_saludables_backup.json", "r", encoding="utf-8-sig") as f:
-        data = json.load(f)
-    all_posts = data.get("posts", [])
-    
-    # El usuario pidió ver TODAS y mostrar el estado "Saved" en el UI.
-    return {
-        "total": len(all_posts),
-        "workflow_a_count": len(all_posts),
-        "workflow_b_count": 0,
-        "posts": all_posts,
-    }
-
-
-@app.get("/collection-posts/state/{collection_id}")
-def get_collection_state(collection_id: str):
-    """Devuelve el último timestamp procesado para esta colección."""
-    state = load_state()
-    return {"last_processed_at": state.get(collection_id)}
-
-
-@app.post("/collection-posts/state/{collection_id}")
-def update_collection_state(collection_id: str, last_processed_at: int):
-    """Guarda el timestamp del post más reciente procesado."""
-    state = load_state()
-    state[collection_id] = last_processed_at
-    save_state(state)
-    return {"saved": True, "last_processed_at": last_processed_at}
-
-
-@app.get("/saved-posts")
-def get_saved_posts(
-    limit: int = 20,
-    x_ig_username: str = Header(None),
-    x_ig_password: str = Header(None)
-):
-    """Devuelve todos los posts guardados (sin filtrar por colección)."""
-    user_cl = get_client_for_user(x_ig_username, x_ig_password)
-    try:
-        results = []
-        next_max_id = None
-
-        while len(results) < limit:
-            params = {"include_igtv_preview": "false"}
-            if next_max_id:
-                params["max_id"] = next_max_id
-
-            data = user_cl.private_request("feed/saved/posts/", params=params)
-            items = data.get("items", [])
-
-            for item in items:
-                results.append(extract_media(item))
-                if len(results) >= limit:
-                    break
-
-            next_max_id = data.get("next_max_id")
-            if not next_max_id or not items:
-                break
-
-    except (LoginRequired, ChallengeRequired) as e:
-        raise HTTPException(status_code=401, detail=f"Autenticación requerida: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    return {"total": len(results), "posts": results}
 
 
 class AnalyzeVideoRequest(BaseModel):
@@ -317,39 +108,6 @@ def analyze_direct(media_id: str, video_url: str, gemini_api_key: str):
     """
     Recibe media_id y video_url (URL-encoded por n8n) como query params.
     """
-    return _do_analyze(media_id, video_url, gemini_api_key)
-
-@app.get("/analyze-media")
-def analyze_media(
-    media_id: str, 
-    gemini_api_key: str,
-    x_ig_username: str = Header(None),
-    x_ig_password: str = Header(None)
-):
-    """
-    Recibe solo media_id como query param (sin caracteres especiales),
-    obtiene la URL directamente desde Instagram (instagrapi),
-    y analiza la imagen/video con Gemini.
-    """
-    user_cl = get_client_for_user(x_ig_username, x_ig_password)
-    try:
-        media_pk = media_id.split("_")[0] if "_" in media_id else media_id
-        try:
-            media = user_cl.media_info_v1(media_pk)
-        except Exception:
-            media = user_cl.media_info(media_pk)
-        if media.media_type == 1:
-            video_url = str(media.thumbnail_url)
-        elif media.media_type == 2:
-            video_url = str(media.video_url)
-        elif media.media_type == 8:
-            first = media.resources[0]
-            video_url = str(first.thumbnail_url) if first.media_type == 1 else str(first.video_url)
-        else:
-            video_url = str(media.thumbnail_url)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error obteniendo media de Instagram: {str(e)}")
-
     return _do_analyze(media_id, video_url, gemini_api_key)
 
 @app.post("/analyze-video")
@@ -388,7 +146,7 @@ def _do_analyze(media_id: str, video_url: str, gemini_api_key: str):
                 "\"origen_nutricional\":\"Calculado por IA\"} "
                 "Si no es receta devuelve {\"nombre\":null}."
             )
-            img_data = __import__('base64').b64encode(req_lib.get(video_url, timeout=30, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.instagram.com/"}).content).decode()
+            img_data = __import__('base64').b64encode(download_bytes(video_url)).decode()
             gen_resp = _gemini_post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}",
                 {"contents": [{"parts": [
@@ -403,20 +161,12 @@ def _do_analyze(media_id: str, video_url: str, gemini_api_key: str):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error analizando imagen: {str(e)}")
 
-    # 1. Descargar video temporalmente
+    # 1. Descargar video temporalmente (con reintentos + fallback a yt-dlp si la URL directa falla/expiró)
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp_path = tmp.name
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://www.instagram.com/",
-            "Accept": "*/*",
-        }
-        r = req_lib.get(video_url, timeout=120, stream=True, headers=headers)
-        r.raise_for_status()
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-            for chunk in r.iter_content(chunk_size=8192):
-                tmp.write(chunk)
-            tmp_path = tmp.name
-    except Exception as e:
+        download_media(video_url, tmp_path, media_id=media_id)
+    except MediaDownloadError as e:
         raise HTTPException(status_code=500, detail=f"Error descargando video: {str(e)}")
 
     # 2. Subir a Gemini Files API
@@ -688,73 +438,6 @@ def analyze_langchain(body: LangchainAnalyzeRequest):
         raise HTTPException(status_code=500, detail=f"Error en pipeline LangChain: {str(e)}")
 
 
-class LangchainAnalyzeByIdRequest(BaseModel):
-    media_id: str
-    gemini_api_key: str = None
-    target_servings: int = 0
-    x_ig_username: str = None
-    x_ig_password: str = None
-    target_servings: int = 0
-    x_ig_username: str = None
-    x_ig_password: str = None
-
-
-@app.post("/analyze-langchain-by-id")
-def analyze_langchain_by_id(body: LangchainAnalyzeByIdRequest):
-    """
-    Versión robusta de /analyze-langchain que solo necesita media_id.
-    Obtiene la URL del video/imagen directamente desde Instagram (instagrapi),
-    sin depender de que la URL venga desde la app.
-
-    Útil cuando post.url viene vacío desde /collection-posts.
-
-    Body:
-        media_id (str): ID único del post de Instagram
-        gemini_api_key (str): API Key de Google Gemini
-        target_servings (int): Para cuántas personas ajustar (0 = original)
-        x_ig_username (str): Usuario de Instagram (opcional si hay sesión)
-        x_ig_password (str): Contraseña de Instagram (opcional si hay sesión)
-    """
-    if not LANGCHAIN_AVAILABLE:
-        raise HTTPException(status_code=503, detail="LangChain no está instalado.")
-
-    # Resolver URL desde el backup (MOCK)
-    try:
-        import json
-        with open("recetas_saludables_backup.json", "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-        posts = data.get("posts", [])
-        
-        # Buscar el post por media_id
-        mock_post = next((p for p in posts if p.get("media_id") == body.media_id), posts[0] if posts else None)
-        
-        if mock_post and "url" in mock_post:
-            video_url = mock_post["url"]
-            caption = mock_post.get("caption", mock_post.get("caption_text", ""))
-        else:
-            raise HTTPException(status_code=404, detail=f"No se pudo obtener URL válida para media_id {body.media_id}")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error obteniendo URL del backup: {str(e)}")
-
-    # Correr el pipeline con la URL resuelta
-    try:
-        from langchain_pipeline import run_recipe_pipeline
-        result = run_recipe_pipeline(
-            media_id=body.media_id,
-            video_url=video_url,
-            gemini_api_key=body.gemini_api_key,
-            target_servings=body.target_servings,
-            save_to_db=True,
-            caption=caption,
-        )
-        return {"status": "success", "video_url_used": video_url, "recipe": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en pipeline LangChain: {str(e)}")
-
-
 @app.get("/recipes")
 def list_recipes():
     """
@@ -810,7 +493,7 @@ def list_recipes():
             "ingredients": ingredientes_mapped,
             "instructions": r.get("instrucciones", []),
             "categories": r.get("tags") or ["Instagram"],
-            "thumbnail_url": r.get("video_url", "")
+            "thumbnail_url": r.get("thumbnail_url", "")
         })
     return {"total": len(mapped_recipes), "recipes": mapped_recipes}
 
@@ -853,42 +536,104 @@ def get_recipe_by_id(media_id: str, target_servings: int = 0):
 # CLOUD SYNC ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-USERS_DB_DIR = "users_db"
-os.makedirs(USERS_DB_DIR, exist_ok=True)
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    return salt.hex() + "$" + hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1).hex()
 
-class SyncUserDataRequest(BaseModel):
-    username: str
+def verify_password(password: str, stored: str) -> bool:
+    salt_hex, hash_hex = stored.split("$", 1)
+    digest = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1).hex()
+    return hmac.compare_digest(digest, hash_hex)
+
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class UserDataRequest(BaseModel):
     profile: dict
     recipes: list
+    eatLog: list = []
 
-@app.post("/sync-user-data")
-def sync_user_data(data: SyncUserDataRequest):
-    """Guarda el perfil y las recetas de un usuario en su archivo JSON."""
-    if not data.username:
-        raise HTTPException(status_code=400, detail="username es requerido")
-    
-    file_path = os.path.join(USERS_DB_DIR, f"{data.username}.json")
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump({"profile": data.profile, "recipes": data.recipes}, f, ensure_ascii=False, indent=2)
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error guardando datos: {str(e)}")
+def _new_session(db, user) -> dict:
+    from models import AuthSession
+    token = secrets.token_urlsafe(32)
+    db.add(AuthSession(token=token, user_id=user.id))
+    db.commit()
+    return {"token": token, "user": {"name": user.name, "email": user.email}}
 
-@app.get("/get-user-data/{username}")
-def get_user_data(username: str):
-    """Obtiene el perfil y las recetas de un usuario."""
-    file_path = os.path.join(USERS_DB_DIR, f"{username}.json")
-    if not os.path.exists(file_path):
-        # Si no existe, no es un error, simplemente retornamos null para indicar que es nuevo
-        return {"status": "not_found", "data": None}
-    
+def current_user(authorization: str = Header(default="")):
+    """Devuelve (db, user) del token `Authorization: Bearer ...`, o 401."""
+    from database import SessionLocal
+    from models import AuthSession, User
+    token = authorization.removeprefix("Bearer ").strip()
+    db = SessionLocal()
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {"status": "success", "data": data}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error leyendo datos: {str(e)}")
+        session = db.get(AuthSession, token) if token else None
+        user = db.get(User, session.user_id) if session else None
+        if not user:
+            raise HTTPException(status_code=401, detail="Sesión inválida o expirada")
+        yield db, user, session
+    finally:
+        db.close()
+
+@app.post("/auth/register")
+def register(body: RegisterRequest):
+    from database import SessionLocal
+    from models import User
+    name, email = body.name.strip(), body.email.strip().lower()
+    if not name:
+        raise HTTPException(status_code=400, detail="Escribe tu nombre")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise HTTPException(status_code=400, detail="Correo inválido")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres")
+    db = SessionLocal()
+    try:
+        if db.query(User).filter(User.email == email).first():
+            raise HTTPException(status_code=409, detail="Ya existe una cuenta con ese correo")
+        user = User(name=name, email=email, password_hash=hash_password(body.password))
+        db.add(user)
+        db.commit()
+        return _new_session(db, user)
+    finally:
+        db.close()
+
+@app.post("/auth/login")
+def login(body: LoginRequest):
+    from database import SessionLocal
+    from models import User
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == body.email.strip().lower()).first()
+        if not user or not verify_password(body.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Correo o contraseña incorrectos")
+        return _new_session(db, user)
+    finally:
+        db.close()
+
+@app.post("/auth/logout")
+def logout(ctx=Depends(current_user)):
+    db, _, session = ctx
+    db.delete(session)
+    db.commit()
+    return {"status": "success"}
+
+@app.get("/me/data")
+def get_my_data(ctx=Depends(current_user)):
+    _, user, _ = ctx
+    return {"user": {"name": user.name, "email": user.email}, "data": json.loads(user.data) if user.data else None}
+
+@app.put("/me/data")
+def put_my_data(body: UserDataRequest, ctx=Depends(current_user)):
+    db, user, _ = ctx
+    user.data = json.dumps(body.model_dump(), ensure_ascii=False)
+    db.commit()
+    return {"status": "success"}
 
 
 
@@ -897,11 +642,17 @@ class MealPlanRequest(BaseModel):
     meals: list
     restrictions: list = []
     cycle_phase: str = ""
-    plan_type: str = "daily"
+    num_days: int = 1
+    goal: Literal["lose", "maintain", "gain"] = "maintain"
+    is_pregnant: bool = False
+    avoid: List[str] = []   # no me gusta / alergias (filtro duro)
+    likes: List[str] = []   # comidas favoritas (se priorizan)
+    use_pantry: bool = True  # priorizar recetas con lo que hay en la despensa (lo que vence primero)
 
 @app.get("/api/recipes")
 def get_all_recipes():
     from database import SessionLocal
+    from diet import diet_labels
     from models import Recipe
     db = SessionLocal()
     recipes = db.query(Recipe).all()
@@ -933,10 +684,13 @@ def get_all_recipes():
 
         result.append({
             "id": r.id,
+            "media_id": r.media_id,
             "title": r.nombre,
             "video_url": r.video_url,
             "thumbnail_url": r.thumbnail_url,
             "servings": r.servings,
+            "cuisine": r.cuisine_type,
+            "category": r.category,
             "categories": r.tags.split(",") if r.tags else [],
             "instructions": instructions,
             "ingredients": ing_mapped,
@@ -944,11 +698,61 @@ def get_all_recipes():
                 "calories": r.nutrition.calories if r.nutrition else 0,
                 "protein": r.nutrition.proteins if r.nutrition else 0,
                 "carbs": r.nutrition.carbohydrates if r.nutrition else 0,
-                "fat": r.nutrition.fats if r.nutrition else 0
-            }
+                "fat": r.nutrition.fats if r.nutrition else 0,
+                "fiber": (r.nutrition.fiber or 0) if r.nutrition else 0,
+                "sugar": (r.nutrition.sugars or 0) if r.nutrition else 0,
+            },
+            # Dietas que cumple (diet.py); el Cookbook filtra con esto según el perfil.
+            "diet": diet_labels(
+                r.tags.split(",") if r.tags else [],
+                [i.get("nombre") or i.get("ingrediente") or "" for i in ing_raw if isinstance(i, dict)],
+                r.nutrition.sugars if r.nutrition else None,
+            ),
         })
     db.close()
     return result
+
+class RecipeSearchRequest(BaseModel):
+    q: str
+
+@app.post("/api/recipes/search")
+def search_recipes(req: RecipeSearchRequest):
+    """
+    Búsqueda en lenguaje natural (ver recipe_search.py): el LLM la convierte en
+    filtros y Chroma ordena por similitud. Devuelve ids de SQLite en orden de
+    relevancia y los filtros que entendió, para mostrarlos en el Cookbook.
+    """
+    from database import SessionLocal
+    from models import Recipe
+    from recipe_search import search
+    from diet import fold
+
+    q = req.q.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="La búsqueda está vacía.")
+    if len(q) > 200:
+        raise HTTPException(status_code=400, detail="La búsqueda es muy larga (máx. 200 caracteres).")
+    try:
+        result = search(fold(q))  # sin tildes: "asiático" y "asiatico" son la misma búsqueda (y el mismo caché)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"No se pudo buscar: {e}")
+
+    db = SessionLocal()
+    try:
+        id_by_media = dict(db.query(Recipe.media_id, Recipe.id).all())
+    finally:
+        db.close()
+    ids = [str(id_by_media[m]) for m in result["media_ids"] if m in id_by_media]
+    return {"ids": list(dict.fromkeys(ids)), "filters": result["filters"]}
+
+def _pantry_by_urgency(db, limit: int = 12) -> List[str]:
+    """Nombres de la despensa con stock, lo que vence primero adelante (shelf_life.py)."""
+    from models import PantryItem
+    from shelf_life import days_left
+    items = [i for i in db.query(PantryItem).all() if (i.amount or "").strip() not in ("0", "0 g", "0 ml")]
+    items.sort(key=lambda i: days_left(i.name, i.added_at))
+    return [i.name for i in items[:limit]]
+
 
 @app.post("/api/mealplan/generate")
 def generate_mealplan(request: MealPlanRequest):
@@ -961,18 +765,24 @@ def generate_mealplan(request: MealPlanRequest):
         "calorias": request.dailyGoals.get("calories", 2000),
         "proteinas": request.dailyGoals.get("protein", 150),
         "carbohidratos": request.dailyGoals.get("carbs", 200),
-        "grasas": request.dailyGoals.get("fat", 60)
+        "grasas": request.dailyGoals.get("fat", 60),
+        "azucares": request.dailyGoals.get("sugar"),
+        "fibra": request.dailyGoals.get("fiber"),
     }
     
     structure = [m.lower() for m in request.meals]
-    
+    num_days = max(1, min(14, request.num_days))
+
     try:
         result = planner.generate(
-            meal_structure=structure, 
+            meal_structure=structure,
             target_macros=targets,
             restrictions=request.restrictions,
             cycle_phase=request.cycle_phase,
-            plan_type=request.plan_type
+            num_days=num_days,
+            profile={"goal": request.goal, "is_pregnant": request.is_pregnant,
+                     "avoid": request.avoid, "likes": request.likes,
+                     "pantry": _pantry_by_urgency(db) if request.use_pantry else []},
         )
     except Exception as e:
         db.close()
@@ -980,3 +790,361 @@ def generate_mealplan(request: MealPlanRequest):
         
     db.close()
     return result
+
+
+@app.post("/api/mealplan/from-pantry")
+def generate_mealplan_from_pantry(request: MealPlanRequest):
+    """Plan día por día solo con lo que hay en la despensa (ver pantry_planner.py)."""
+    from database import SessionLocal
+    from pantry_planner import plan_from_pantry
+    g = request.dailyGoals
+    targets = {"calorias": g.get("calories", 2000), "proteinas": g.get("protein", 150),
+               "carbohidratos": g.get("carbs", 200), "grasas": g.get("fat", 60),
+               "azucares": g.get("sugar"), "fibra": g.get("fiber")}
+    db = SessionLocal()
+    try:
+        return plan_from_pantry(
+            db, [m.lower() for m in request.meals], targets, request.restrictions,
+            {"goal": request.goal, "is_pregnant": request.is_pregnant, "avoid": request.avoid, "likes": request.likes},
+            max_days=max(1, min(14, request.num_days)),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
+
+class InstagramExportUpload(BaseModel):
+    filename: str
+    data_base64: str  # el ZIP (o JSON) de "Descargar tu información", como en el escaneo de boletas
+
+
+def _saved_summary(db) -> dict:
+    """Cuántos guardados hay por colección y estado (para la pantalla de importación)."""
+    from collections import Counter
+    from models import SavedImport
+    rows = db.query(SavedImport.collection, SavedImport.status).all()
+    by_col: dict = {}
+    for col, status in rows:
+        by_col.setdefault(col or "Sin colección", Counter())[status] += 1
+    return {
+        "total": len(rows),
+        "por_estado": dict(Counter(s for _, s in rows)),
+        "colecciones": sorted(({"nombre": k, "total": sum(v.values()), **v} for k, v in by_col.items()),
+                              key=lambda c: -c["total"]),
+    }
+
+
+@app.post("/api/import/instagram-export")
+def import_instagram_export(body: InstagramExportUpload):
+    """
+    Importa en bloque los guardados desde la exportación oficial de Instagram, sin
+    entrar a la cuenta. Quedan en la cola `saved_imports`; los que ya están en el
+    recetario se marcan "en_recetario".
+    """
+    import base64
+    from database import SessionLocal
+    from ig_export import parse_export, shortcode_to_pk
+    from models import Recipe, SavedImport
+
+    try:
+        posts = parse_export(base64.b64decode(body.data_base64), body.filename)
+    except (ValueError, KeyError, json.JSONDecodeError, zipfile.BadZipFile) as e:
+        raise HTTPException(status_code=400, detail=f"No pude leer la exportación: {e}")
+
+    db = SessionLocal()
+    try:
+        # media_id de las recetas es "<pk>_<user>": con el pk se reconoce lo que ya está.
+        have_pks = {(m or "").split("_")[0] for (m,) in db.query(Recipe.media_id).all()}
+        existing = {s.shortcode: s for s in db.query(SavedImport).all()}
+        nuevos = 0
+        for p in posts:
+            row = existing.get(p["shortcode"])
+            if not row:
+                row = SavedImport(shortcode=p["shortcode"], url=p["url"], status="pendiente")
+                db.add(row)
+                nuevos += 1
+            row.username = p["username"] or row.username
+            row.collection = p["collection"] or row.collection
+            row.saved_at = p["saved_at"] or row.saved_at
+            if row.status == "pendiente" and shortcode_to_pk(p["shortcode"]) in have_pks:
+                row.status = "en_recetario"
+        db.commit()
+        return {"leidos": len(posts), "nuevos": nuevos, **_saved_summary(db)}
+    finally:
+        db.close()
+
+
+@app.get("/api/import/saved")
+def get_saved_imports():
+    from database import SessionLocal
+    db = SessionLocal()
+    try:
+        return _saved_summary(db)
+    finally:
+        db.close()
+
+
+class MealPrepRequest(BaseModel):
+    sessions: list
+
+@app.post("/api/mealprep/generate")
+def generate_mealprep(request: MealPrepRequest):
+    from mealprep_planner import MealPrepPlanner
+    planner = MealPrepPlanner()
+
+    try:
+        result = planner.generate(request.sessions)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return result
+
+
+# --- PANTRY & GROCERY LIST ENDPOINTS ---
+
+class PantryItemCreate(BaseModel):
+    name: str
+    amount: str = None
+
+@app.get("/api/pantry")
+def get_pantry():
+    from database import SessionLocal
+    from models import PantryItem
+    db = SessionLocal()
+    from datetime import date
+    from shelf_life import days_left
+    try:
+        items = db.query(PantryItem).all()
+        for i in items:
+            if not i.added_at:  # items de antes de guardar la fecha: se cuentan desde hoy
+                i.added_at = date.today().isoformat()
+        db.commit()
+        result = [{"id": i.id, "name": i.name, "amount": i.amount, "added_at": i.added_at,
+                   "days_left": days_left(i.name, i.added_at)} for i in items]
+        # Lo que vence primero, arriba.
+        return sorted(result, key=lambda r: r["days_left"])
+    finally:
+        db.close()
+
+@app.post("/api/pantry")
+def add_pantry_item(item: PantryItemCreate):
+    """
+    Si ya existe un item con el mismo nombre (ej. al tildar un item de la
+    grocery list dos semanas seguidas), suma la cantidad en vez de crear una
+    fila duplicada - pero solo cuando ambas cantidades tienen la misma
+    unidad; si no, no adivinamos la suma y se guarda como fila aparte.
+    """
+    from database import SessionLocal
+    from models import PantryItem
+    from ingredient_normalizer import parse_amount_str, normalize_ingredient_name
+    from shopping_list import to_canonical, parse_free_text
+
+    name_clean = item.name.strip()
+    amount = (item.amount or "").strip()
+    if not amount:
+        # Input manual en una sola línea: "1lb de arroz" -> ("arroz", "1 lb")
+        name_clean, amount = parse_free_text(name_clean)
+    item.amount = amount or None
+    if not name_clean:
+        raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+
+    db = SessionLocal()
+    try:
+        # "Huevos" y "huevo" son el mismo item; el pantry es chico, se recorre entero.
+        norm = normalize_ingredient_name(name_clean) or name_clean.lower()
+        existing = next((p for p in db.query(PantryItem).all()
+                         if (normalize_ingredient_name(p.name) or p.name.lower()) == norm), None)
+
+        if existing:
+            new_qty, new_unit = to_canonical(*parse_amount_str(str(item.amount or "")))
+            old_qty, old_unit = to_canonical(*parse_amount_str(str(existing.amount or "")))
+            if new_qty and old_qty and new_unit == old_unit:
+                total = old_qty + new_qty
+                existing.amount = f"{total:g} {new_unit}".strip()
+                db.commit()
+                db.refresh(existing)
+                return {"id": existing.id, "name": existing.name, "amount": existing.amount}
+
+        from datetime import date
+        # Si se suma a un item existente se conserva su fecha (lo más viejo se daña primero).
+        new_item = PantryItem(name=name_clean, amount=item.amount, added_at=date.today().isoformat())
+        db.add(new_item)
+        db.commit()
+        db.refresh(new_item)
+        return {"id": new_item.id, "name": new_item.name, "amount": new_item.amount}
+    finally:
+        db.close()
+
+class PantryRemoveByName(BaseModel):
+    name: str
+
+@app.post("/api/pantry/remove")
+def remove_pantry_ingredient(item: PantryRemoveByName):
+    """
+    Al desmarcar un item de la grocery list ("no lo tengo"): borra ese
+    ingrediente del pantry, con el mismo matching de nombre que usa la lista
+    ("Huevos" == "huevo"). Restar solo lo necesario dejaría el item cubierto
+    si había stock de sobra, y el check volvería a marcarse solo.
+    """
+    from database import SessionLocal
+    from models import PantryItem
+    from ingredient_normalizer import normalize_ingredient_name
+
+    name_clean = item.name.strip()
+    if not name_clean:
+        raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+
+    db = SessionLocal()
+    try:
+        norm = normalize_ingredient_name(name_clean) or name_clean.lower()
+        for p in db.query(PantryItem).all():
+            if (normalize_ingredient_name(p.name) or p.name.lower()) == norm:
+                db.delete(p)
+        db.commit()
+        return {"status": "ok"}
+    finally:
+        db.close()
+
+class ReceiptScanRequest(BaseModel):
+    image: str  # data URL: "data:image/jpeg;base64,..."
+
+class ReceiptItem(BaseModel):
+    name: str
+    amount: str = ""
+
+class ReceiptItems(BaseModel):
+    items: List[ReceiptItem]
+
+RECEIPT_PROMPT = (
+    "Eres un asistente que lee recibos de supermercado. Extrae SOLO alimentos e "
+    "ingredientes (ignora bolsas, productos de limpieza, impuestos, descuentos y totales).\n"
+    "- name: nombre genérico en español, en singular y minúsculas, SIN marca, sabor "
+    "comercial ni tamaño (ej. 'ARROZ DIANA 1KG' -> 'arroz', 'LECHE ALQUERIA ENT' -> 'leche').\n"
+    "- amount: cantidad TOTAL comprada con unidad (g, kg, ml, l, lb, oz o sin unidad para "
+    "piezas). Multiplica unidades x tamaño del paquete (2 x arroz 1kg -> '2 kg'). Si el "
+    "recibo no indica el tamaño, usa solo el número de unidades (ej. '1').\n"
+    "- Si el mismo alimento aparece varias veces, únelo en una sola entrada.\n"
+    "Si la imagen no es un recibo, devuelve items vacío."
+)
+
+@app.post("/api/pantry/receipt")
+def scan_receipt(req: ReceiptScanRequest):
+    """
+    Lee una foto de un recibo con Gemini y devuelve los alimentos con nombre
+    genérico (sin marca). NO guarda nada: el frontend muestra la lista para que
+    el usuario la revise/edite y luego agrega cada item con POST /api/pantry.
+    """
+    from rag_chatbot import get_llm
+    from langchain_core.messages import HumanMessage
+
+    m = re.match(r"^data:(image/(?:jpeg|png|webp|heic|heif));base64,", req.image)
+    if not m:
+        raise HTTPException(status_code=400, detail="Sube una imagen JPG, PNG, WEBP o HEIC del recibo.")
+    if len(req.image) > 14_000_000:  # ~10 MB de imagen en base64
+        raise HTTPException(status_code=413, detail="La imagen es muy grande (máx. 10 MB).")
+
+    llm = get_llm()
+    if not llm:
+        raise HTTPException(status_code=500, detail="El LLM no está configurado (falta GEMINI_API_KEY).")
+
+    try:
+        result = llm.with_structured_output(ReceiptItems).invoke([HumanMessage(content=[
+            {"type": "text", "text": RECEIPT_PROMPT},
+            {"type": "image_url", "image_url": req.image},
+        ])])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"No se pudo leer el recibo: {e}")
+
+    items = [{"name": i.name.strip(), "amount": i.amount.strip()}
+             for i in (result.items if result else []) if i.name.strip()]
+    return {"items": items}
+
+@app.delete("/api/pantry/{item_id}")
+def delete_pantry_item(item_id: int):
+    from database import SessionLocal
+    from models import PantryItem
+    db = SessionLocal()
+    item = db.query(PantryItem).filter(PantryItem.id == item_id).first()
+    if item:
+        db.delete(item)
+        db.commit()
+    db.close()
+    return {"status": "ok"}
+
+class GroceryPlanRequest(BaseModel):
+    meals: List[Dict]
+
+@app.post("/api/grocery/generate")
+def generate_grocery_list(req: GroceryPlanRequest):
+    """
+    Genera la lista de compras de forma determinística (sin LLM):
+    1. Suma los ingredientes de TODAS las recetas del plan (día o semana).
+    2. Resta lo que ya hay en el Pantry.
+    3. Devuelve solo lo que falta, con la cantidad faltante exacta.
+    """
+    from database import SessionLocal
+    from models import PantryItem
+    from shopping_list import generate_shopping_list
+
+    db = SessionLocal()
+    try:
+        pantry_items = db.query(PantryItem).all()
+        grocery_list = generate_shopping_list(req.meals, pantry_items)
+        return {"grocery_list": grocery_list}
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROCESAMIENTO AUTOMÁTICO EN LOTE DE UNA CARPETA (flujo: conectar → carpeta →
+# video por video → download_media → JSON → LLM completa nutrición → Cookbook)
+# ─────────────────────────────────────────────────────────────────────────────
+
+BATCH_JOBS: Dict[str, Dict] = {}
+
+
+class TikTokImportRequest(BaseModel):
+    url: str
+    gemini_api_key: str = None
+    target_servings: int = 0
+
+
+@app.post("/api/tiktok/import")
+def import_tiktok_recipe(body: TikTokImportRequest):
+    """
+    Descarga un video de TikTok a partir de su URL y lo procesa con el mismo
+    pipeline de LangChain que usa Instagram (extraer -> estructurar -> nutrición).
+    Termina en el mismo Cookbook (SQLite + Chroma), sin distinción de origen.
+    """
+    if not LANGCHAIN_AVAILABLE:
+        raise HTTPException(status_code=503, detail="LangChain no está instalado.")
+
+    import yt_dlp
+
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            info = ydl.extract_info(body.url, download=False)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"No se pudo leer el video de TikTok: {str(e)}")
+
+    video_id = info.get("id") if info else None
+    if not video_id:
+        raise HTTPException(status_code=400, detail="No se pudo identificar el video de TikTok (¿la URL es correcta?).")
+
+    media_id = f"tiktok_{video_id}"
+    caption = (info.get("description") or info.get("title") or "").strip()
+
+    try:
+        from langchain_pipeline import run_recipe_pipeline
+        result = run_recipe_pipeline(
+            media_id=media_id,
+            video_url=body.url,
+            gemini_api_key=body.gemini_api_key,
+            target_servings=body.target_servings,
+            save_to_db=True,
+            caption=caption,
+        )
+        return {"status": "success", "media_id": media_id, "recipe": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en pipeline: {str(e)}")

@@ -42,6 +42,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
+from recipe_search import CUISINES
 
 # ──────────────────────────────────────────────
 # DB local de recetas (JSON)
@@ -80,20 +81,28 @@ def save_recipe(media_id: str, recipe: dict):
 # Descarga el video/imagen y lo envía a Gemini para extraer texto crudo
 # ──────────────────────────────────────────────
 
-def _gemini_post_raw(url: str, payload: dict, timeout: int = 60, max_retries: int = 4) -> dict:
-    """POST a Gemini API con retry automático en 429."""
-    wait = 15
-    for attempt in range(max_retries):
-        resp = req_lib.post(url, json=payload, timeout=timeout)
+def _gemini_generate(payload: dict, api_key: str, timeout: int = 60) -> dict:
+    """
+    generateContent rotando modelos (cada uno tiene su cupo gratis diario): si uno
+    responde 429 se pasa al siguiente en vez de esperar. Ver llm_chain.py.
+    """
+    from llm_chain import gemini_models, mark_exhausted, AllProvidersExhausted
+    for model in gemini_models(lite=True):
+        # La key va en header: en la URL terminaba impresa en los logs de error.
+        resp = req_lib.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            headers={"x-goog-api-key": api_key}, json=payload, timeout=timeout)
         if resp.status_code == 429:
-            time.sleep(wait)
-            wait *= 2
+            mark_exhausted(model)
+            continue
+        if resp.status_code >= 500:
+            # 503 "high demand": el modelo está saturado ahora, no sin cupo -> probar otro sin pausarlo
+            print(f"   [llm_chain] {model} respondió {resp.status_code}, probando el siguiente")
             continue
         resp.raise_for_status()
         time.sleep(3)  # cortesía para RPM
         return resp.json()
-    resp.raise_for_status()
-    return resp.json()
+    raise AllProvidersExhausted("RESOURCE_EXHAUSTED: ningún modelo Gemini con cupo para leer el video/imagen")
 
 
 def extract_text_from_media(inputs: dict) -> dict:
@@ -124,10 +133,20 @@ def extract_text_from_media(inputs: dict) -> dict:
         "nombre de la receta, todos los ingredientes con sus cantidades, "
         "todos los pasos del proceso de preparación, tiempo de cocción, "
         "y porciones si se mencionan. "
+        "Para CADA paso incluye: qué ingredientes y cuánto se usa, técnica, temperatura "
+        "del horno o nivel de fuego, tiempos (cocción, reposo, refrigeración, congelado) "
+        "y la señal de que está listo (ej. 'hasta que dore', 'hasta que espese'). "
+        "No resumas ni juntes pasos. Si un tiempo o temperatura no se dice pero la técnica "
+        "lo requiere (ej. refrigerar la avena nocturna, precalentar el horno), indica el valor "
+        "típico marcado como 'aprox.'. "
         "Si hay valores nutricionales visibles, inclúyelos también. "
         "Sé lo más detallado y completo posible. Si el contenido NO es una receta, "
         "responde únicamente: 'NO_ES_RECETA'."
     )
+    # El caption suele traer la receta escrita (cantidades, tiempos): se usa junto al video, no solo como fallback.
+    caption = inputs.get("caption", "")
+    if caption:
+        EXTRACTION_PROMPT += f"\n\nTexto del post (caption), úsalo para completar lo que no se vea:\n{caption}"
 
     if is_image:
         # Imagen: usar inline_data con base64
@@ -143,12 +162,12 @@ def extract_text_from_media(inputs: dict) -> dict:
                     ]
                 }]
             }
-            resp = _gemini_post_raw(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={gemini_api_key}",
-                payload
-            )
+            resp = _gemini_generate(payload, gemini_api_key)
             raw_text = resp["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
+            from llm_chain import AllProvidersExhausted
+            if isinstance(e, AllProvidersExhausted):
+                raise  # sin cupo: mejor parar y reintentar que guardar una receta hecha solo con el caption
             caption = inputs.get("caption", "")
             if caption:
                 # Fallback to using just the caption since the image URL expired
@@ -167,41 +186,19 @@ def extract_text_from_media(inputs: dict) -> dict:
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
                 tmp_path = tmp.name
                 
-            downloaded = False
-            if video_url:
-                try:
-                    # Download directly from URL
-                    resp = req_lib.get(video_url, timeout=30, stream=True)
-                    if resp.status_code == 200:
-                        with open(tmp_path, 'wb') as f:
-                            for chunk in resp.iter_content(chunk_size=8192):
-                                f.write(chunk)
-                        downloaded = True
-                        print("Downloaded video directly from URL!")
-                    else:
-                        print(f"Failed to download from URL, status code: {resp.status_code}")
-                except Exception as e:
-                    print(f"Error downloading from URL: {e}")
-            
-            if not downloaded:
-                print("Falling back to yt-dlp...")
-                # Descargar video usando ig_downloader
-                from ig_downloader import download_ig_video
-                for attempt in range(3):
-                    try:
-                        download_ig_video(media_id, tmp_path)
-                        downloaded = True
-                        break  # Éxito, salir del loop
-                    except Exception as e:
-                        if attempt == 2:
-                            raise RuntimeError(f"Fallo al descargar video tras 3 intentos: {str(e)}")
-                        time.sleep(2)
+            # Descarga con reintentos + backoff; si la URL directa falló del
+            # todo (ej. venció), cae internamente a yt-dlp con el media_id.
+            from ig_media import download_media, MediaDownloadError
+            try:
+                download_media(video_url, tmp_path, media_id=media_id)
+            except MediaDownloadError as e:
+                raise RuntimeError(f"Fallo al descargar video: {str(e)}")
 
             # Subir a Gemini Files API
             print("Uploading to Gemini Files API...")
             upload_url = (
                 f"https://generativelanguage.googleapis.com/upload/v1beta/files"
-                f"?uploadType=multipart&key={gemini_api_key}"
+                f"?uploadType=multipart"
             )
             with open(tmp_path, "rb") as f:
                 video_bytes = f.read()
@@ -216,7 +213,7 @@ def extract_text_from_media(inputs: dict) -> dict:
 
             upload_resp = req_lib.post(
                 upload_url,
-                headers={"Content-Type": f"multipart/related; boundary={boundary}"},
+                headers={"Content-Type": f"multipart/related; boundary={boundary}", "x-goog-api-key": gemini_api_key},
                 data=body,
                 timeout=120
             )
@@ -231,8 +228,8 @@ def extract_text_from_media(inputs: dict) -> dict:
                 time.sleep(5)
                 try:
                     status_resp = req_lib.get(
-                        f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={gemini_api_key}",
-                        timeout=30
+                        f"https://generativelanguage.googleapis.com/v1beta/{file_name}",
+                        headers={"x-goog-api-key": gemini_api_key}, timeout=30
                     )
                     state = status_resp.json().get("state")
                     print(f"Video state: {state}")
@@ -251,11 +248,7 @@ def extract_text_from_media(inputs: dict) -> dict:
                     ]
                 }]
             }
-            resp = _gemini_post_raw(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={gemini_api_key}",
-                payload,
-                timeout=60
-            )
+            resp = _gemini_generate(payload, gemini_api_key, timeout=60)
             print("generateContent successful!")
             raw_text = resp["candidates"][0]["content"]["parts"][0]["text"]
             
@@ -276,6 +269,9 @@ def extract_text_from_media(inputs: dict) -> dict:
 
         except Exception as e:
             print("Exception in extract_text_from_media:", str(e))
+            from llm_chain import AllProvidersExhausted
+            if isinstance(e, AllProvidersExhausted):
+                raise  # sin cupo: mejor parar y reintentar que guardar una receta hecha solo con el caption
             caption = inputs.get("caption", "")
             if caption:
                 # Fallback to using just the caption since the video URL expired
@@ -303,6 +299,27 @@ def extract_text_from_media(inputs: dict) -> dict:
 # Toma el texto crudo y lo estructura en JSON de receta
 # ──────────────────────────────────────────────
 
+# Categorías por contenido. Los slugs deben coincidir con las imágenes de
+# frontend/public/placeholders (ver DISH_IMAGES en Cookbook.tsx).
+CATEGORIAS = {
+    "ensaladas": "vegetales u otros ingredientes fríos mezclados y aliñados, bowls tipo poke",
+    "sopas": "todo lo líquido que se come con cuchara: sopas, cremas, caldos, ramen",
+    "guisos": "cocciones lentas en salsa espesa: curry, estofado, chili, cazuelas",
+    "pastas": "pastas y fideos de cualquier tipo",
+    "arroces": "el grano es el protagonista: risotto, paella, quinoa, cuscús",
+    "aves": "pollo, pavo o pato como plato principal",
+    "carnes": "vacuno, cerdo o cordero como plato principal",
+    "comida_de_mar": "pescados y mariscos",
+    "snacks": "snacks salados para picar: papas fritas, nachos, palomitas, dips",
+    "verduras": "verduras cocidas o legumbres como plato principal, tofu",
+    "comida_rapida": "hamburguesas, pizzas, sándwiches, tacos, burritos, wraps, empanadas, dumplings",
+    "panes": "panes y horneados salados: pan, focaccia, bagels, quiches, crackers",
+    "desayunos": "avena, chía, granola, yogur, cottage, panqueques, waffles, huevos",
+    "postres": "todo lo dulce: tortas, galletas, helados, mousse, bolitas energéticas",
+    "bebidas": "todo lo que se toma: batidos, jugos, cafés, tés, mocktails",
+    "untables": "quesos, mantequillas, mermeladas, salsas, aderezos, condimentos y preparaciones caseras en frasco",
+}
+
 STRUCTURE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """Eres un asistente experto en estructurar recetas de cocina.
 Tu tarea es tomar un texto crudo que describe una receta y convertirlo en un JSON perfectamente estructurado.
@@ -310,23 +327,32 @@ Tu tarea es tomar un texto crudo que describe una receta y convertirlo en un JSO
 REGLAS ESTRICTAS:
 1. Responde ÚNICAMENTE con JSON válido, sin markdown, sin bloques de código, sin texto adicional.
 2. Si el texto dice 'NO_ES_RECETA', devuelve exactamente: {{"nombre": null}}
-3. Si el tiempo no se menciona, usa null. Si las porciones no se mencionan explícitamente, infiérelas lógicamente basándote en las cantidades de los ingredientes (ej: 250g de pasta suele ser 2 porciones). Si no hay cantidades, usa 1.
-4. Normaliza las cantidades: convierte tazas, cucharadas, etc. a gramos/ml cuando sea posible.
-5. Separa cada paso de las instrucciones como un elemento independiente de la lista.
-6. Genera una lista de 'tags' indicando el tipo de comida (ej: desayuno, almuerzo, cena, postre, snack) según los ingredientes y el estilo.
+3. Si el tiempo no se menciona, usa null. 'porciones' SOLO si el texto dice explícitamente cuántas porciones/personas rinde; si no lo dice, usa null (no adivines: se calculan después a partir de los ingredientes).
+4. Normaliza las cantidades: convierte tazas, cucharadas, etc. a gramos/ml cuando sea posible. Si el texto NO dice cuánto de un ingrediente, estima la cantidad típica para esa receta (ej. un bark de yogur: ~300 g de yogur griego) en vez de dejar null: sin cantidades no se puede calcular la nutrición. Solo sal, pimienta y especias "al gusto" pueden quedar sin cantidad.
+5. Separa cada paso de las instrucciones como un elemento independiente de la lista. NO resumas: conserva en cada paso las cantidades, temperaturas, nivel de fuego, tiempos (incluido reposo/refrigeración) y señales de punto que traiga el texto, incluidos los valores marcados 'aprox.'. No antepongas "Paso N:".
+6. Genera una lista de 'tags' indicando el tipo de comida (ej: desayuno, almuerzo, cena, postre, snack) según los ingredientes y el estilo. IMPORTANTE: si la receta es una salsa, aderezo, dip, mermelada, crema untable, topping o cualquier acompañamiento que NO se coma solo como una comida o snack completo, NO le asignes tags de tipo de comida (desayuno/almuerzo/cena/snack) — en su lugar usa únicamente el tag "condimento" (junto con "salsa", "aderezo", "dip", etc. si aplica). Estos tags de tipo de comida son solo para platos que alguien serviría como esa comida completa por sí sola. Lo mismo para bebidas (chocolate caliente, té, café, jugos, electrolitos, mocktails): usa solo "bebida" y "otros", sin tags de tipo de comida. Y para suplementos o remedios caseros (magnesio en polvo, proteína en polvo, termogénicos): usa solo "suplemento" y "otros".
+7. Identifica el 'tipo_cocina' según los ingredientes y técnicas usadas. Exactamente una de: """ + ", ".join(CUISINES) + """ (sin tildes; china/japonesa/coreana -> asiatica, colombiana/peruana -> latina, griega/española/turca -> mediterranea; una fusión va con la cocina que más pese). Si no es claramente de ninguna tradición específica, usa "internacional".
+8. Clasifica 'dificultad' como "facil", "media" o "dificil", según la cantidad de pasos, técnicas involucradas y tiempo de preparación.
+9. 'categoria' es QUÉ ES el plato por su contenido (no su origen ni el momento del día). Elige exactamente una de:
+""" + "\n".join(f"   - {slug}: {desc}" for slug, desc in CATEGORIAS.items()) + """
+10. 'tiempos': minutos de preparación activa, cocción y reposo/refrigeración/congelado (null si no aplica). 'tiempo_preparacion_min' es el total de los tres.
 
 Estructura JSON requerida:
 {{
   "nombre": "Nombre de la receta",
   "tiempo_preparacion_min": 30,
+  "tiempos": {{"preparacion_min": 10, "coccion_min": 20, "reposo_min": null}},
   "porciones": 4,
+  "categoria": "pastas",
   "tags": ["almuerzo", "cena"],
+  "tipo_cocina": "italiana",
+  "dificultad": "facil",
   "ingredientes": [
     {{"nombre": "nombre del ingrediente", "cantidad": 200, "unidad": "g"}}
   ],
   "instrucciones": [
-    "Paso 1: ...",
-    "Paso 2: ..."
+    "Precalentar el horno a 180°C.",
+    "Batir 2 huevos con 50 g de azúcar durante 3 minutos, hasta que blanqueen."
   ]
 }}"""),
     ("human", "Texto de la receta:\n\n{raw_text}")
@@ -347,24 +373,12 @@ def structure_recipe(inputs: dict) -> dict:
             "structured_recipe": {"nombre": None}
         }
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-flash-lite-latest",
-        google_api_key=gemini_api_key,
-        temperature=0.0,
-    )
-    chain = STRUCTURE_PROMPT | llm | JsonOutputParser()
-
+    # Rota modelos con cupo (llm_chain.py); si uno devuelve JSON inválido, prueba el siguiente.
+    from llm_chain import invoke_json
     try:
-        structured = chain.invoke({"raw_text": raw_text})
-    except Exception:
-        # Fallback: intentar parsear el JSON de la respuesta de texto directamente
-        try:
-            response = (STRUCTURE_PROMPT | llm).invoke({"raw_text": raw_text})
-            text = response.content if hasattr(response, "content") else str(response)
-            match = re.search(r'\{[\s\S]*\}', text)
-            structured = json.loads(match.group(0)) if match else {"nombre": None}
-        except Exception as e:
-            raise RuntimeError(f"Error estructurando receta: {str(e)}")
+        structured = invoke_json(STRUCTURE_PROMPT, {"raw_text": raw_text}, lite=True)
+    except Exception as e:
+        raise RuntimeError(f"Error estructurando receta: {str(e)}")
 
     return {
         **inputs,
@@ -373,57 +387,34 @@ def structure_recipe(inputs: dict) -> dict:
 
 
 # ──────────────────────────────────────────────
-# PASO 3: Nutrition Calculator Chain
-# Calcula valores nutricionales y ajusta cantidades por número de personas
+# PASO 3: Nutrición y porciones
+# El LLM estima gramos/macros POR INGREDIENTE y Python suma, elige las
+# porciones y divide (ver nutrition_calc.py). Antes un solo prompt adivinaba
+# porciones y macros por porción por separado y no cuadraban entre sí.
 # ──────────────────────────────────────────────
 
-NUTRITION_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """Eres un nutricionista experto y calculador de macronutrientes.
-Tu tarea es calcular los valores nutricionales de una receta y ajustar las cantidades según el número de personas objetivo.
-
-CONSTANTES CALÓRICAS:
-- 1g de Grasa = 9 kcal
-- 1g de Proteína = 4 kcal  
-- 1g de Carbohidratos = 4 kcal
-- 1g de Azúcar = 4 kcal (subcategoría de carbohidratos)
-- 1g de Fibra = 2 kcal
-
-REGLAS:
-1. Responde ÚNICAMENTE con JSON válido, sin markdown, sin bloques de código.
-2. Los valores nutricionales deben ser POR PORCIÓN (del target_servings).
-3. Si la receta tiene valores nutricionales explícitos en el texto, úsalos. Si no, calcúlalos basándote en los ingredientes.
-4. Para ajustar ingredientes: multiplica cada cantidad por (target_servings / porciones_originales).
-5. Redondea cantidades a 1 decimal.
-
-Estructura JSON requerida:
-{{
-  "nutricion_por_porcion": {{
-    "calorias": 350,
-    "proteina_g": 25.0,
-    "carbohidratos_g": 40.0,
-    "grasa_g": 8.0,
-    "azucares_g": 5.0,
-    "fibra_g": 3.0
-  }},
-  "origen_nutricional": "Calculado por IA",
-  "porciones_originales": 4,
-  "porciones_ajustadas": 2,
-  "ingredientes_ajustados": [
-    {{"nombre": "nombre del ingrediente", "cantidad": 100.0, "unidad": "g"}}
-  ]
-}}"""),
-    ("human", """Receta estructurada:
-{structured_recipe_json}
-
-Porciones originales: {porciones_originales}
-Porciones objetivo (target): {target_servings}""")
-])
+def _scale_ingredients(ingredientes: list, factor: float) -> list:
+    """Multiplica las cantidades numéricas; "al gusto" y similares quedan igual."""
+    if factor == 1:
+        return ingredientes
+    scaled = []
+    for ing in ingredientes:
+        ing = dict(ing)
+        try:
+            ing["cantidad"] = round(float(ing["cantidad"]) * factor, 1)
+        except (KeyError, TypeError, ValueError):
+            pass
+        scaled.append(ing)
+    return scaled
 
 
 def calculate_nutrition(inputs: dict) -> dict:
     """
-    Paso 3: Calcula nutrición por porción y ajusta cantidades según target_servings.
+    Paso 3: Calcula nutrición por porción (coherente con los ingredientes) y
+    ajusta cantidades según target_servings.
     """
+    from nutrition_calc import calculate
+
     structured_recipe: dict = inputs["structured_recipe"]
     gemini_api_key: str = inputs.get("gemini_api_key") or get_env_var("GEMINI_API_KEY")
     target_servings: int = inputs.get("target_servings", 0)
@@ -439,57 +430,67 @@ def calculate_nutrition(inputs: dict) -> dict:
             }
         }
 
-    porciones_originales = structured_recipe.get("porciones", 1) or 1
+    ingredientes = structured_recipe.get("ingredientes", []) or []
+    try:
+        explicitas = int(structured_recipe.get("porciones") or 0) or None
+    except (TypeError, ValueError):
+        explicitas = None
+
+    try:
+        calc = calculate(
+            structured_recipe.get("nombre"), structured_recipe.get("tags", []), ingredientes,
+            texto=inputs.get("raw_text", ""), porciones_explicitas=explicitas, api_key=gemini_api_key,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Error calculando nutrición: {str(e)}")
+
+    if calc["status"] == "ok":
+        porciones_originales = calc["porciones"]
+        n = calc["nutricion_por_porcion"]
+        nutricion = {
+            "calorias": n["kcal"], "proteina_g": n["proteina_g"], "carbohidratos_g": n["carbohidratos_g"],
+            "grasa_g": n["grasa_g"], "azucares_g": n["azucares_g"], "fibra_g": n["fibra_g"],
+        }
+        origen = "Calculado por IA (por ingrediente)"
+    else:
+        # Sin cantidades no hay con qué calcular: no se inventan números.
+        porciones_originales = explicitas or 1
+        nutricion = {}
+        origen = "Sin cantidades: nutrición no calculada"
+
     # Si no se especifica target_servings, usar las porciones originales
     if not target_servings or target_servings <= 0:
         target_servings = porciones_originales
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-flash-lite-latest",
-        google_api_key=gemini_api_key,
-        temperature=0.0,
-    )
-    chain = NUTRITION_PROMPT | llm | JsonOutputParser()
-
-    try:
-        nutrition_data = chain.invoke({
-            "structured_recipe_json": json.dumps(structured_recipe, ensure_ascii=False),
-            "porciones_originales": porciones_originales,
-            "target_servings": target_servings,
-        })
-    except Exception:
-        # Fallback: parsear de texto
-        try:
-            response = (NUTRITION_PROMPT | llm).invoke({
-                "structured_recipe_json": json.dumps(structured_recipe, ensure_ascii=False),
-                "porciones_originales": porciones_originales,
-                "target_servings": target_servings,
-            })
-            text = response.content if hasattr(response, "content") else str(response)
-            match = re.search(r'\{[\s\S]*\}', text)
-            nutrition_data = json.loads(match.group(0)) if match else {}
-        except Exception as e:
-            raise RuntimeError(f"Error calculando nutrición: {str(e)}")
-
-    from video_utils import extract_end_frame
-    thumb_url = extract_end_frame(inputs.get("video_url", ""), inputs["media_id"])
+    from video_utils import extract_end_frame, save_remote_image
+    # Frame del video; si no es video (post de foto), se guarda la imagen misma.
+    thumb_url = (extract_end_frame(inputs.get("video_url", ""), inputs["media_id"])
+                 or save_remote_image(inputs.get("video_url", ""), inputs["media_id"]))
 
     # Construir receta final completa
     final_recipe = {
         "media_id": inputs["media_id"],
         "video_url": inputs.get("video_url", ""),
-        "thumbnail_url": thumb_url or inputs.get("video_url", ""),
+        "thumbnail_url": thumb_url,  # nunca la URL del CDN: caduca y puede ser un .mp4
         "is_recipe": True,
         "nombre": structured_recipe.get("nombre"),
         "tiempo_preparacion_min": structured_recipe.get("tiempo_preparacion_min"),
-        "porciones_originales": nutrition_data.get("porciones_originales", porciones_originales),
-        "porciones_ajustadas": nutrition_data.get("porciones_ajustadas", target_servings),
+        "porciones_originales": porciones_originales,
+        "porciones_ajustadas": target_servings,
         "tags": structured_recipe.get("tags", []),
-        "ingredientes": structured_recipe.get("ingredientes", []),
-        "ingredientes_ajustados": nutrition_data.get("ingredientes_ajustados", []),
+        "tipo_cocina": structured_recipe.get("tipo_cocina"),
+        "dificultad": structured_recipe.get("dificultad"),
+        "ingredientes": ingredientes,
+        "ingredientes_ajustados": _scale_ingredients(ingredientes, target_servings / porciones_originales),
         "instrucciones": structured_recipe.get("instrucciones", []),
-        "nutricion_por_porcion": nutrition_data.get("nutricion_por_porcion", {}),
-        "origen_nutricional": nutrition_data.get("origen_nutricional", "Calculado por IA"),
+        "nutricion_por_porcion": nutricion,
+        "origen_nutricional": origen,
+        # Si el modelo inventa una categoría fuera de la lista, se deja vacía (el frontend tiene su respaldo).
+        "categoria": structured_recipe.get("categoria") if structured_recipe.get("categoria") in CATEGORIAS else None,
+        "tiempos": structured_recipe.get("tiempos"),
+        # Se guardan para poder re-procesar sin volver a Instagram (reprocess_recipes.py).
+        "texto_extraido": inputs.get("raw_text", ""),
+        "estructura": structured_recipe,
     }
 
     return {
@@ -559,5 +560,12 @@ def run_recipe_pipeline(
 
     if save_to_db and final_recipe.get("is_recipe"):
         save_recipe(media_id, final_recipe)
+        # Persistir también en SQLite: es lo que /api/recipes y el Cookbook
+        # realmente leen. Antes esto requería correr un script aparte a mano.
+        try:
+            from recipe_store import persist_recipe_to_sqlite
+            persist_recipe_to_sqlite(media_id, final_recipe, {"caption": caption})
+        except Exception as e:
+            print(f"[langchain_pipeline] Aviso: no se pudo persistir '{media_id}' en SQLite: {e}")
 
     return final_recipe

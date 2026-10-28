@@ -8,6 +8,6 @@ payload = {
     "plan_type": "daily"
 }
 
-resp = requests.post("http://localhost:8001/api/mealplan/generate", json=payload)
+resp = requests.post("http://localhost:8011/api/mealplan/generate", json=payload)
 print(resp.status_code)
 print(json.dumps(resp.json(), indent=2))

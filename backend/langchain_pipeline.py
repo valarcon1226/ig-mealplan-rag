@@ -42,6 +42,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_google_genai import ChatGoogleGenerativeAI
+from recipe_search import CUISINES
 
 # ──────────────────────────────────────────────
 # DB local de recetas (JSON)
@@ -330,7 +331,7 @@ REGLAS ESTRICTAS:
 4. Normaliza las cantidades: convierte tazas, cucharadas, etc. a gramos/ml cuando sea posible. Si el texto NO dice cuánto de un ingrediente, estima la cantidad típica para esa receta (ej. un bark de yogur: ~300 g de yogur griego) en vez de dejar null: sin cantidades no se puede calcular la nutrición. Solo sal, pimienta y especias "al gusto" pueden quedar sin cantidad.
 5. Separa cada paso de las instrucciones como un elemento independiente de la lista. NO resumas: conserva en cada paso las cantidades, temperaturas, nivel de fuego, tiempos (incluido reposo/refrigeración) y señales de punto que traiga el texto, incluidos los valores marcados 'aprox.'. No antepongas "Paso N:".
 6. Genera una lista de 'tags' indicando el tipo de comida (ej: desayuno, almuerzo, cena, postre, snack) según los ingredientes y el estilo. IMPORTANTE: si la receta es una salsa, aderezo, dip, mermelada, crema untable, topping o cualquier acompañamiento que NO se coma solo como una comida o snack completo, NO le asignes tags de tipo de comida (desayuno/almuerzo/cena/snack) — en su lugar usa únicamente el tag "condimento" (junto con "salsa", "aderezo", "dip", etc. si aplica). Estos tags de tipo de comida son solo para platos que alguien serviría como esa comida completa por sí sola. Lo mismo para bebidas (chocolate caliente, té, café, jugos, electrolitos, mocktails): usa solo "bebida" y "otros", sin tags de tipo de comida. Y para suplementos o remedios caseros (magnesio en polvo, proteína en polvo, termogénicos): usa solo "suplemento" y "otros".
-7. Identifica el 'tipo_cocina' (ej: italiana, mexicana, asiática, mediterránea, americana, latina, fusión, etc.) según los ingredientes y técnicas usadas. Si no es claramente de ninguna tradición específica, usa "internacional".
+7. Identifica el 'tipo_cocina' según los ingredientes y técnicas usadas. Exactamente una de: """ + ", ".join(CUISINES) + """ (sin tildes; china/japonesa/coreana -> asiatica, colombiana/peruana -> latina, griega/española/turca -> mediterranea; una fusión va con la cocina que más pese). Si no es claramente de ninguna tradición específica, usa "internacional".
 8. Clasifica 'dificultad' como "facil", "media" o "dificil", según la cantidad de pasos, técnicas involucradas y tiempo de preparación.
 9. 'categoria' es QUÉ ES el plato por su contenido (no su origen ni el momento del día). Elige exactamente una de:
 """ + "\n".join(f"   - {slug}: {desc}" for slug, desc in CATEGORIAS.items()) + """

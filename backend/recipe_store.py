@@ -15,6 +15,7 @@ import json
 
 from database import SessionLocal
 from models import Recipe, NutritionInformation
+from recipe_search import canon_cuisine
 
 
 def persist_recipe_to_sqlite(media_id: str, final_recipe: dict, post: dict = None) -> dict:
@@ -83,7 +84,7 @@ def persist_recipe_to_sqlite(media_id: str, final_recipe: dict, post: dict = Non
         recipe.tags = ", ".join(str(t).lower().strip() for t in tags) if tags else None
         recipe.instructions = json.dumps(final_recipe.get("instrucciones", []), ensure_ascii=False)
         recipe.ingredients_raw = json.dumps(ingredientes, ensure_ascii=False)
-        recipe.cuisine_type = (final_recipe.get("tipo_cocina") or "").lower().strip() or None
+        recipe.cuisine_type = canon_cuisine(final_recipe.get("tipo_cocina"))
         recipe.dificultad = (final_recipe.get("dificultad") or "").lower().strip() or None
 
         db.commit()

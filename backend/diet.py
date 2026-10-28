@@ -10,6 +10,7 @@ la receta NO se marca como apta. Las palabras se buscan como palabras
 completas: antes "res" (carne) coincidía con "fresas".
 """
 import re
+import unicodedata
 from typing import Iterable, List, Optional
 
 DIET_LABELS = ["Vegetariano", "Vegano", "Sin Gluten", "Sin Lácteos", "Sin Frutos Secos", "Sin Mariscos", "Apto Diabético"]
@@ -75,10 +76,15 @@ def diet_labels(tags: Iterable[str], ingredient_names: Iterable[str], sugar_g: O
     return [l for l in DIET_LABELS if l in labels]
 
 
+def fold(s: str) -> str:
+    """Minúsculas y sin tildes: "Asiática" == "asiatica", "limón" == "limon" (la ñ queda n)."""
+    return "".join(c for c in unicodedata.normalize("NFKD", (s or "").lower().strip()) if not unicodedata.combining(c))
+
+
 def avoids(texts: Iterable[str], disliked: Iterable[str]) -> bool:
     """True si ningún ingrediente/nombre contiene algo de la lista 'no me gusta / alergias'."""
-    blob = " ".join(t for t in texts if t).lower()
-    return not any(d.strip().lower() and re.search(rf"\b{re.escape(d.strip().lower())}", blob) for d in disliked or [])
+    blob = fold(" ".join(t for t in texts if t))
+    return not any(fold(d) and re.search(rf"\b{re.escape(fold(d))}", blob) for d in disliked or [])
 
 
 if __name__ == "__main__":
@@ -88,6 +94,8 @@ if __name__ == "__main__":
     v = diet_labels([], ["Leche de almendras", "Avena", "Plátano"], 8)
     assert {"Vegano", "Sin Lácteos", "Apto Diabético"} <= set(v) and "Sin Frutos Secos" not in v, v
     assert "Vegano" not in diet_labels([], ["Yogur griego"], 5)
+    assert fold(" Asiática ") == "asiatica"
+    assert not avoids(["Jugo de limón"], ["limon"]) and not avoids(["jugo de limon"], ["Limón"])
     assert "Sin Lácteos" not in diet_labels([], ["Queso cottage"], 5)
     assert "Sin Gluten" not in diet_labels([], ["Harina"], 5)
     assert "Sin Gluten" in diet_labels([], ["Harina de almendra"], 5)

@@ -69,7 +69,6 @@ export type UserProfile = {
   isPregnant?: boolean;
   prePregnancyWeight?: number;
   pregnancyDueDate?: string;
-  igUsername?: string;
   dietaryRestrictions?: string[]; // DIET_LABELS: filtro duro en Cookbook y planner
   avoidFoods?: string[];          // no me gusta / alergias: filtro duro
   favoriteFoods?: string[];       // le gusta: se priorizan

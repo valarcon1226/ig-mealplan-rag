@@ -1,12 +1,15 @@
 import os
 import re
 import json
+import hmac
+import hashlib
+import secrets
 import zipfile
 import time
 import tempfile
 import threading
 import requests as req_lib
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -533,42 +536,104 @@ def get_recipe_by_id(media_id: str, target_servings: int = 0):
 # CLOUD SYNC ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-USERS_DB_DIR = "users_db"
-os.makedirs(USERS_DB_DIR, exist_ok=True)
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    return salt.hex() + "$" + hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1).hex()
 
-class SyncUserDataRequest(BaseModel):
-    username: str
+def verify_password(password: str, stored: str) -> bool:
+    salt_hex, hash_hex = stored.split("$", 1)
+    digest = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1).hex()
+    return hmac.compare_digest(digest, hash_hex)
+
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class UserDataRequest(BaseModel):
     profile: dict
     recipes: list
+    eatLog: list = []
 
-@app.post("/sync-user-data")
-def sync_user_data(data: SyncUserDataRequest):
-    """Guarda el perfil y las recetas de un usuario en su archivo JSON."""
-    if not data.username:
-        raise HTTPException(status_code=400, detail="username es requerido")
-    
-    file_path = os.path.join(USERS_DB_DIR, f"{data.username}.json")
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump({"profile": data.profile, "recipes": data.recipes}, f, ensure_ascii=False, indent=2)
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error guardando datos: {str(e)}")
+def _new_session(db, user) -> dict:
+    from models import AuthSession
+    token = secrets.token_urlsafe(32)
+    db.add(AuthSession(token=token, user_id=user.id))
+    db.commit()
+    return {"token": token, "user": {"name": user.name, "email": user.email}}
 
-@app.get("/get-user-data/{username}")
-def get_user_data(username: str):
-    """Obtiene el perfil y las recetas de un usuario."""
-    file_path = os.path.join(USERS_DB_DIR, f"{username}.json")
-    if not os.path.exists(file_path):
-        # Si no existe, no es un error, simplemente retornamos null para indicar que es nuevo
-        return {"status": "not_found", "data": None}
-    
+def current_user(authorization: str = Header(default="")):
+    """Devuelve (db, user) del token `Authorization: Bearer ...`, o 401."""
+    from database import SessionLocal
+    from models import AuthSession, User
+    token = authorization.removeprefix("Bearer ").strip()
+    db = SessionLocal()
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {"status": "success", "data": data}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error leyendo datos: {str(e)}")
+        session = db.get(AuthSession, token) if token else None
+        user = db.get(User, session.user_id) if session else None
+        if not user:
+            raise HTTPException(status_code=401, detail="Sesión inválida o expirada")
+        yield db, user, session
+    finally:
+        db.close()
+
+@app.post("/auth/register")
+def register(body: RegisterRequest):
+    from database import SessionLocal
+    from models import User
+    name, email = body.name.strip(), body.email.strip().lower()
+    if not name:
+        raise HTTPException(status_code=400, detail="Escribe tu nombre")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise HTTPException(status_code=400, detail="Correo inválido")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres")
+    db = SessionLocal()
+    try:
+        if db.query(User).filter(User.email == email).first():
+            raise HTTPException(status_code=409, detail="Ya existe una cuenta con ese correo")
+        user = User(name=name, email=email, password_hash=hash_password(body.password))
+        db.add(user)
+        db.commit()
+        return _new_session(db, user)
+    finally:
+        db.close()
+
+@app.post("/auth/login")
+def login(body: LoginRequest):
+    from database import SessionLocal
+    from models import User
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == body.email.strip().lower()).first()
+        if not user or not verify_password(body.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Correo o contraseña incorrectos")
+        return _new_session(db, user)
+    finally:
+        db.close()
+
+@app.post("/auth/logout")
+def logout(ctx=Depends(current_user)):
+    db, _, session = ctx
+    db.delete(session)
+    db.commit()
+    return {"status": "success"}
+
+@app.get("/me/data")
+def get_my_data(ctx=Depends(current_user)):
+    _, user, _ = ctx
+    return {"user": {"name": user.name, "email": user.email}, "data": json.loads(user.data) if user.data else None}
+
+@app.put("/me/data")
+def put_my_data(body: UserDataRequest, ctx=Depends(current_user)):
+    db, user, _ = ctx
+    user.data = json.dumps(body.model_dump(), ensure_ascii=False)
+    db.commit()
+    return {"status": "success"}
 
 
 
@@ -582,6 +647,7 @@ class MealPlanRequest(BaseModel):
     is_pregnant: bool = False
     avoid: List[str] = []   # no me gusta / alergias (filtro duro)
     likes: List[str] = []   # comidas favoritas (se priorizan)
+    use_pantry: bool = True  # priorizar recetas con lo que hay en la despensa (lo que vence primero)
 
 @app.get("/api/recipes")
 def get_all_recipes():
@@ -659,6 +725,7 @@ def search_recipes(req: RecipeSearchRequest):
     from database import SessionLocal
     from models import Recipe
     from recipe_search import search
+    from diet import fold
 
     q = req.q.strip()
     if not q:
@@ -666,7 +733,7 @@ def search_recipes(req: RecipeSearchRequest):
     if len(q) > 200:
         raise HTTPException(status_code=400, detail="La búsqueda es muy larga (máx. 200 caracteres).")
     try:
-        result = search(q.lower())
+        result = search(fold(q))  # sin tildes: "asiático" y "asiatico" son la misma búsqueda (y el mismo caché)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"No se pudo buscar: {e}")
 
@@ -677,6 +744,15 @@ def search_recipes(req: RecipeSearchRequest):
         db.close()
     ids = [str(id_by_media[m]) for m in result["media_ids"] if m in id_by_media]
     return {"ids": list(dict.fromkeys(ids)), "filters": result["filters"]}
+
+def _pantry_by_urgency(db, limit: int = 12) -> List[str]:
+    """Nombres de la despensa con stock, lo que vence primero adelante (shelf_life.py)."""
+    from models import PantryItem
+    from shelf_life import days_left
+    items = [i for i in db.query(PantryItem).all() if (i.amount or "").strip() not in ("0", "0 g", "0 ml")]
+    items.sort(key=lambda i: days_left(i.name, i.added_at))
+    return [i.name for i in items[:limit]]
+
 
 @app.post("/api/mealplan/generate")
 def generate_mealplan(request: MealPlanRequest):
@@ -705,7 +781,8 @@ def generate_mealplan(request: MealPlanRequest):
             cycle_phase=request.cycle_phase,
             num_days=num_days,
             profile={"goal": request.goal, "is_pregnant": request.is_pregnant,
-                     "avoid": request.avoid, "likes": request.likes},
+                     "avoid": request.avoid, "likes": request.likes,
+                     "pantry": _pantry_by_urgency(db) if request.use_pantry else []},
         )
     except Exception as e:
         db.close()

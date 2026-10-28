@@ -93,8 +93,10 @@ class RAGMealPlanner:
 
     def _query(self, meal_type: str) -> str:
         """Texto de búsqueda semántica: el tipo de comida + lo que le gusta al usuario."""
-        likes = getattr(self, "likes", [])
-        return f"recetas de {meal_type}" + (f" con {', '.join(likes)}" if likes else "")
+        # Gustos + despensa (lo que vence primero va adelante): la búsqueda vectorial trae
+        # primero recetas con esos ingredientes.
+        terms = getattr(self, "likes", []) + getattr(self, "pantry", [])
+        return f"recetas de {meal_type}" + (f" con {', '.join(terms)}" if terms else "")
 
     @staticmethod
     def _build_meal(recipe: Recipe, m_type: str) -> Dict[str, Any]:
@@ -277,6 +279,7 @@ class RAGMealPlanner:
         restrictions = list(restrictions or [])
         self.avoid = [a for a in profile.get("avoid") or [] if a.strip()]
         self.likes = [l for l in profile.get("likes") or [] if l.strip()]
+        self.pantry = [p for p in profile.get("pantry") or [] if p.strip()]
         is_multi_day = num_days > 1
         n_results = 3
         
@@ -408,6 +411,7 @@ Perfil del Usuario:
 - Restricciones Alimentarias: {', '.join(restrictions) if restrictions else 'Ninguna'}
 - No come / alergias: {', '.join(self.avoid) if self.avoid else 'Nada'}
 - Le gusta (prioriza estas recetas cuando cumplan los macros): {', '.join(self.likes) if self.likes else 'Sin preferencias'}
+- Tiene en la despensa, ordenado por lo que vence primero (prioriza recetas que lo usen, para no desperdiciar comida; lo que falte se compra): {', '.join(self.pantry) if self.pantry else 'Nada registrado'}
 
 Instrucciones:
 Revisa los siguientes candidatos y cumple tu objetivo.

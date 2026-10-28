@@ -2,12 +2,14 @@ import { useState, useEffect } from 'react';
 import { useStore } from '../lib/store';
 import { Trash2, ShoppingCart, Archive, ListChecks, Plus, Loader2, Receipt, X } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import ExportButtons from '../lib/ExportButtons';
 
 export default function Pantry() {
   const { currentMealPlan } = useStore();
-  const [subTab, setSubTab] = useState<'inventory' | 'grocery'>('inventory');
+  // /pantry?tab=grocery opens the grocery list directly (link from the Planner).
+  const [searchParams] = useSearchParams();
+  const [subTab, setSubTab] = useState<'inventory' | 'grocery'>(searchParams.get('tab') === 'grocery' ? 'grocery' : 'inventory');
   
   return (
     <div className="p-4 max-w-lg mx-auto space-y-6 pt-8 pb-24">

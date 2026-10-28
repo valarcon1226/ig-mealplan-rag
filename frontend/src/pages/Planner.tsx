@@ -71,7 +71,8 @@ export default function Planner() {
           is_pregnant: !!profile.isPregnant,
           restrictions: profile.dietaryRestrictions ?? [],
           avoid: profile.avoidFoods ?? [],
-          likes: profile.favoriteFoods ?? []
+          likes: profile.favoriteFoods ?? [],
+          use_pantry: true // the normal plan also uses what's in the pantry first
         })
       });
       const data = await res.json();
@@ -92,6 +93,7 @@ export default function Planner() {
         setPlan(data);
         setCurrentMealPlan(data);
         setCurrentDayIndex(0);
+        setPlanNote('El plan usa primero lo que tienes en la despensa (lo que vence antes). Lo que falte está en tu lista de mercado.');
       }
     } catch (err) {
       console.error(err);
@@ -192,14 +194,24 @@ export default function Planner() {
               />
             </div>
 
-            <label className="flex items-start gap-3 p-3 bg-black rounded-lg border border-neutral-800 cursor-pointer">
-              <input type="checkbox" checked={fromPantry} onChange={e => setFromPantry(e.target.checked)}
-                className="w-5 h-5 mt-0.5 accent-orange-500" />
-              <span>
-                <span className="text-white font-medium block">Usar solo lo que tengo en la despensa</span>
-                <span className="text-xs text-neutral-500">Arma los días que alcancen con tu despensa (puede faltar algo chico) y te dice cuántos días te dura.</span>
-              </span>
-            </label>
+            {/* Both modes use the pantry first (soonest-to-expire first); they differ in what happens
+                with whatever is missing. */}
+            <fieldset className="space-y-2">
+              <legend className="text-xs font-bold text-neutral-400 mb-2">¿Qué hacemos con lo que falte?</legend>
+              {([
+                [false, 'Plan completo + lista de mercado', 'Usa primero lo que tienes (lo que vence antes va primero) y completa los días con otras recetas. Lo que falte queda en tu lista de mercado.'],
+                [true, 'Solo con lo que tengo', 'Arma únicamente los días que alcanzan con tu despensa (puede faltar algo chico) y te dice cuántos días te dura.'],
+              ] as const).map(([value, title, help]) => (
+                <label key={title} className={`flex items-start gap-3 p-3 bg-black rounded-lg border cursor-pointer ${fromPantry === value ? 'border-orange-500' : 'border-neutral-800'}`}>
+                  <input type="radio" name="pantry-mode" checked={fromPantry === value} onChange={() => setFromPantry(value)}
+                    className="w-5 h-5 mt-0.5 accent-orange-500" />
+                  <span>
+                    <span className="text-white font-medium block">{title}</span>
+                    <span className="text-xs text-neutral-500">{help}</span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
 
             <p className="text-sm text-neutral-400">Which meals do you want to include each day?</p>
             <div className="space-y-2 max-h-[40vh] overflow-y-auto">
@@ -228,7 +240,7 @@ export default function Planner() {
       {planNote && (
         <div role="status" className="bg-orange-500/10 border border-orange-500/30 text-orange-200 rounded-xl p-3 text-sm flex items-start justify-between gap-3 print:hidden">
           <span>{planNote}</span>
-          <Link to="/pantry" className="shrink-0 text-orange-400 font-bold hover:text-orange-300">Ir a mercado →</Link>
+          <Link to="/pantry?tab=grocery" className="shrink-0 text-orange-400 font-bold hover:text-orange-300">Ver lista de mercado →</Link>
         </div>
       )}
 

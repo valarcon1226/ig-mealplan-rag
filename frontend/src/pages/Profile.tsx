@@ -9,7 +9,7 @@ import 'react-datepicker/dist/react-datepicker.css';
 import toast from 'react-hot-toast';
 
 export default function Profile() {
-  const { profile, updateProfile, loadFromCloud, dailyConsumption } = useStore();
+  const { profile, updateProfile, user, logout, dailyConsumption } = useStore();
   // Same green -> red scale as the Dashboard sugar bar: nothing eaten = green, at/over the max = red.
   const sugarToday = dailyConsumption.macros.sugar;
   const sugarRatio = profile.dailyGoals.sugar > 0 ? Math.min(sugarToday / profile.dailyGoals.sugar, 1) : 0;
@@ -20,12 +20,8 @@ export default function Profile() {
   const [showHealthConnectModal, setShowHealthConnectModal] = useState(false);
   
   const [n8n, setN8n] = useState(profile.n8nWebhookUrl || '');
-  const [showIgModal, setShowIgModal] = useState(false);
-  const [showIgConnectionModal, setShowIgConnectionModal] = useState(false);
-  const [igUsername, setIgUsername] = useState('');
-  const [igLoading, setIgLoading] = useState(false);
-  const [igError, setIgError] = useState('');
-  
+  const [showAccountModal, setShowAccountModal] = useState(false);
+
   const [showGarminModal, setShowGarminModal] = useState(false);
   const [showGarminConnectionModal, setShowGarminConnectionModal] = useState(false);
   const [garminUser, setGarminUser] = useState('');
@@ -42,28 +38,6 @@ export default function Profile() {
     updateProfile({ n8nWebhookUrl: n8n });
     toast.success("Saved");
   }
-
-  // App username: only identifies your synced data on the backend (loadFromCloud).
-  // It no longer logs into Instagram: that got the account flagged.
-  const handleIgLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIgError('');
-    const username = igUsername.trim();
-    if (!username) {
-      setIgError('Escribe un nombre de usuario');
-      return;
-    }
-    setIgLoading(true);
-    try {
-      updateProfile({ instagramApiKey: JSON.stringify({ username }) });
-      await loadFromCloud(username);
-      setShowIgModal(false);
-    } catch {
-      setIgError('No se pudo conectar con el servidor. Intenta de nuevo.');
-    } finally {
-      setIgLoading(false);
-    }
-  };
 
   const handleGarminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -95,15 +69,6 @@ export default function Profile() {
     }
   };
 
-  const igUserLabel = (() => {
-    try {
-       const keyData = JSON.parse(profile.instagramApiKey || '{}');
-       return keyData.username || 'IG User';
-    } catch {
-       return profile.instagramApiKey ? 'IG User' : '';
-    }
-  })();
-
   return (
     <div className="p-4 max-w-lg mx-auto space-y-8 pt-8 pb-20">
       <header className="flex justify-between items-start mb-2">
@@ -119,60 +84,18 @@ export default function Profile() {
             >
               <HeartPulse className="w-3.5 h-3.5" /> Health Connect
             </button>
-            {!profile.instagramApiKey ? (
-              <button 
-                onClick={() => setShowIgModal(true)}
-                className="bg-gradient-to-tr from-pink-500 via-red-500 to-orange-500 text-white text-xs font-bold px-4 py-2 rounded-xl shadow-lg hover:opacity-90 transition-opacity"
-              >
-                Iniciar sesión
-              </button>
-            ) : (
-              <button 
-                onClick={() => setShowIgConnectionModal(true)}
-                className="bg-green-500/10 hover:bg-green-500/20 text-green-400 border border-green-500/20 text-xs font-bold px-4 py-2 rounded-xl transition-colors cursor-pointer"
-              >
-                {igUserLabel}
-              </button>
-            )}
+            <button
+              onClick={() => setShowAccountModal(true)}
+              className="bg-green-500/10 hover:bg-green-500/20 text-green-400 border border-green-500/20 text-xs font-bold px-4 py-2 rounded-xl transition-colors cursor-pointer"
+            >
+              {user?.name || 'Mi cuenta'}
+            </button>
           </div>
         </div>
       </header>
 
-      {/* IG Modal */}
-      {showIgModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl w-full max-w-sm shadow-2xl relative overflow-hidden">
-            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-pink-500 via-red-500 to-orange-500"></div>
-            <h3 className="text-xl font-bold mb-1 text-white mt-2">Tu usuario en la app</h3>
-            <p className="text-xs text-neutral-500 mb-4">Solo identifica tus datos guardados en el servidor. La app no se conecta a tu Instagram.</p>
-            
-            <form onSubmit={handleIgLogin} className="space-y-4">
-              {igError && (
-                <div className="bg-red-500/10 border border-red-500/20 text-red-500 text-xs px-4 py-3 rounded-xl mb-4">
-                  {igError}
-                </div>
-              )}
-              <input 
-                type="text" 
-                value={igUsername}
-                onChange={e => setIgUsername(e.target.value)}
-                placeholder="Usuario" aria-label="Usuario de la app" 
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-sm outline-none text-white focus:border-pink-500 transition-colors"
-                required
-              />
-              <div className="flex gap-2 pt-4">
-                <button type="button" onClick={() => setShowIgModal(false)} className="flex-1 py-3 bg-neutral-800 hover:bg-neutral-700 rounded-xl text-white text-sm font-bold transition-colors">Cancel</button>
-                <button type="submit" disabled={igLoading} className="flex-1 bg-gradient-to-r from-pink-500 to-orange-500 hover:opacity-90 rounded-xl text-white text-sm font-bold transition-opacity">
-                  {igLoading ? "Cargando..." : "Entrar"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* IG Connected Details Modal */}
-      {showIgConnectionModal && (
+      {/* Account Modal */}
+      {showAccountModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
           <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl w-full max-w-sm shadow-2xl relative overflow-hidden">
             {/* Background design */}
@@ -184,7 +107,8 @@ export default function Profile() {
                   <UserCircle className="w-12 h-12 text-neutral-500" />
                 </div>
               </div>
-              <h3 className="text-xl font-bold text-white">{igUserLabel}</h3>
+              <h3 className="text-xl font-bold text-white">{user?.name}</h3>
+              <p className="text-sm text-neutral-400">{user?.email}</p>
               <p className="text-sm text-neutral-400 flex items-center gap-1 mt-1">
                 <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
                 Datos sincronizados
@@ -193,12 +117,9 @@ export default function Profile() {
 
             <div className="space-y-3">
               <div className="flex gap-2 pt-2">
-                <button type="button" onClick={() => setShowIgConnectionModal(false)} className="flex-1 py-3 text-white text-sm font-bold bg-neutral-800 rounded-xl hover:bg-neutral-700 transition-colors">Done</button>
-                <button 
-                  onClick={() => {
-                    updateProfile({ instagramApiKey: undefined, igSyncWebhookUrl: undefined, igFolders: undefined });
-                    setShowIgConnectionModal(false);
-                  }} 
+                <button type="button" onClick={() => setShowAccountModal(false)} className="flex-1 py-3 text-white text-sm font-bold bg-neutral-800 rounded-xl hover:bg-neutral-700 transition-colors">Done</button>
+                <button
+                  onClick={logout}
                   className="flex-1 bg-red-500/10 text-red-500 text-sm border border-red-500/20 font-bold rounded-xl py-3 hover:bg-red-500/20 transition-colors"
                 >
                   Cerrar sesión

@@ -222,3 +222,28 @@ class SavedImport(Base):
 
 from database import engine
 SavedImport.__table__.create(bind=engine, checkfirst=True)
+
+
+class User(Base):
+    """Cuenta de la app. `data` guarda el perfil, el recetario y el registro de comidas (JSON)."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    password_hash = Column(String, nullable=False)  # "salt_hex$scrypt_hex"
+    data = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class AuthSession(Base):
+    """Token de sesión (uno por dispositivo con sesión iniciada)."""
+    __tablename__ = "auth_sessions"
+
+    token = Column(String, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+User.__table__.create(bind=engine, checkfirst=True)
+AuthSession.__table__.create(bind=engine, checkfirst=True)

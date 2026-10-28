@@ -8,6 +8,7 @@ import Pantry from './pages/Pantry';
 import Mealprep from './pages/Mealprep';
 import Profile from './pages/Profile';
 import RecipeImport from './pages/RecipeImport';
+import Login from './pages/Login';
 import { Home, Book, Calendar, User, ShoppingBag } from 'lucide-react';
 import { cn } from './lib/cn';
 import { Toaster } from 'react-hot-toast';
@@ -47,7 +48,7 @@ function Navigation() {
 }
 
 function PwaLayout({ children }: { children: React.ReactNode }) {
-  const { isLoading } = useStore();
+  const { isLoading, token } = useStore();
 
   if (isLoading) {
     return (
@@ -56,6 +57,8 @@ function PwaLayout({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
+
+  if (!token) return <Login />;
 
   return (
     <div className="min-h-screen bg-black text-neutral-100 font-sans pb-20">

@@ -253,7 +253,8 @@ def perform_filtered_search(collection, query: str, min_calories: float = None, 
     if min_fiber is not None:
         filters.append({"fibra": {"$gte": max(min_fiber, 0)}})
     if cuisine_type is not None:
-        filters.append({"cuisine_type": cuisine_type.lower().strip()})
+        from recipe_search import canon_cuisine
+        filters.append({"cuisine_type": canon_cuisine(cuisine_type)})
     if dificultad is not None:
         filters.append({"dificultad": dificultad.lower().strip()})
 

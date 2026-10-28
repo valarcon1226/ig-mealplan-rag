@@ -1,7 +1,12 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { get, set } from 'idb-keyval';
+import { get, set, del } from 'idb-keyval';
 import { EatEntry, Macros, Recipe, UserProfile } from './types';
 import { format, subDays } from 'date-fns';
+
+type AuthUser = { name: string; email: string };
+
+// Everything this browser keeps for the logged-in user; wiped on logout so the next person starts clean.
+const LOCAL_KEYS = ['app_token', 'app_recipes', 'app_profile', 'app_eat_log', 'app_daily', 'app_mealplan', 'app_mealplan_start'];
 
 type StoreContextType = {
   recipes: Recipe[];
@@ -19,8 +24,11 @@ type StoreContextType = {
   dailyConsumption: { date: string; macros: typeof defaultProfile.dailyGoals; caloriesBurned: number };
   updateDailyConsumption: (updates: Partial<StoreContextType['dailyConsumption']>) => void;
   isLoading: boolean;
-  loadFromCloud: (username: string) => Promise<void>;
-  syncToCloud: () => Promise<void>;
+  token: string | null;
+  user: AuthUser | null;
+  login: (email: string, password: string) => Promise<void>;
+  register: (name: string, email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
   currentMealPlan: any | null;
   setCurrentMealPlan: (plan: any | null) => void;
   planStart: string | null;
@@ -93,43 +101,68 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     set('app_mealplan_start', start);
   };
 
-  const triggerSync = (currentProfile: UserProfile, currentRecipes: Recipe[]) => {
-    if (!currentProfile.igUsername) return;
-    fetch('/api/sync-user-data', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: currentProfile.igUsername,
-        profile: currentProfile,
-        recipes: currentRecipes
-      })
-    }).catch(err => console.error('Cloud sync failed:', err));
+  // Account session: profile, cookbook and eat log are saved to the logged-in user on the backend.
+  const [token, setToken] = useState<string | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  // Only push to the cloud after the account's data was loaded, so local state never overwrites it.
+  const [cloudReady, setCloudReady] = useState(false);
+
+  const resetSession = async () => {
+    await Promise.all(LOCAL_KEYS.map(k => del(k)));
+    setToken(null); setUser(null); setCloudReady(false);
+    setRecipes([]); setProfile(defaultProfile); setEatLog([]);
+    setCurrentMealPlanState(null); setPlanStart(null);
   };
 
-  const loadFromCloud = async (username: string) => {
-    setIsLoading(true);
+  const loadFromCloud = async (authToken: string) => {
     try {
-      const res = await fetch(`/api/get-user-data/${username}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.status === 'success' && data.data) {
-          const loadedProfile = { ...data.data.profile, igUsername: username };
-          setProfile(loadedProfile);
-          set('app_profile', loadedProfile);
-          
-          setRecipes(normalizeRecipes(data.data.recipes || []));
-          set('app_recipes', data.data.recipes || []);
-        }
+      const res = await fetch('/api/me/data', { headers: { Authorization: `Bearer ${authToken}` } });
+      if (res.status === 401) return resetSession();
+      if (!res.ok) return;
+      const { user: u, data } = await res.json();
+      setUser(u);
+      // No data yet (new account): keep what's in this browser; the sync effect uploads it.
+      if (data) {
+        if (data.profile) { setProfile(data.profile); set('app_profile', data.profile); }
+        setRecipes(normalizeRecipes(data.recipes || [])); set('app_recipes', data.recipes || []);
+        setEatLog(data.eatLog || []); set('app_eat_log', data.eatLog || []);
       }
+      setCloudReady(true);
     } catch (e) {
+      // ponytail: offline = local only until the next app load; add retry if devices go offline often.
       console.error('Failed to load from cloud', e);
     }
-    setIsLoading(false);
   };
 
-  const syncToCloud = async () => {
-    triggerSync(profile, recipes);
+  const authenticate = async (path: string, body: object) => {
+    const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'No se pudo conectar con el servidor');
+    await set('app_token', data.token);
+    setToken(data.token);
+    setUser(data.user);
+    await loadFromCloud(data.token);
   };
+
+  const login = (email: string, password: string) => authenticate('/api/auth/login', { email, password });
+  const register = (name: string, email: string, password: string) => authenticate('/api/auth/register', { name, email, password });
+
+  const logout = async () => {
+    if (token) await fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    await resetSession();
+  };
+
+  useEffect(() => {
+    if (!token || !cloudReady) return;
+    const t = setTimeout(() => {
+      fetch('/api/me/data', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ profile, recipes, eatLog }),
+      }).catch(err => console.error('Cloud sync failed:', err));
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [token, cloudReady, profile, recipes, eatLog]);
 
   useEffect(() => {
     const loadData = async () => {
@@ -164,7 +197,13 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
         setPlanStart(storedStart);
         set('app_mealplan_start', storedStart);
       }
-      
+
+      const storedToken = await get('app_token');
+      if (storedToken) {
+        setToken(storedToken);
+        await loadFromCloud(storedToken);
+      }
+
       setIsLoading(false);
     };
     loadData();
@@ -174,21 +213,18 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   const setAllRecipes = (newRecipes: Recipe[]) => {
     setRecipes(newRecipes);
     set('app_recipes', newRecipes);
-    triggerSync(profile, newRecipes);
   };
 
   const addRecipe = (recipe: Recipe) => {
     const newRecipes = [...recipes, recipe];
     setRecipes(newRecipes);
     set('app_recipes', newRecipes);
-    triggerSync(profile, newRecipes);
   };
 
   const deleteRecipe = (id: string) => {
     const newRecipes = recipes.filter(r => r.id !== id);
     setRecipes(newRecipes);
     set('app_recipes', newRecipes);
-    triggerSync(profile, newRecipes);
   };
 
   // Functional form so several updates in one handler (e.g. replace = unlog + log) don't overwrite each other.
@@ -196,7 +232,6 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     setRecipes(prev => {
       const newRecipes = prev.map(r => r.id === id ? { ...r, ...fn(r) } : r);
       set('app_recipes', newRecipes);
-      triggerSync(profile, newRecipes);
       return newRecipes;
     });
   };
@@ -231,7 +266,6 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
     const newProfile = { ...profile, ...updates };
     setProfile(newProfile);
     set('app_profile', newProfile);
-    triggerSync(newProfile, recipes);
   };
 
   const updateDailyConsumption = (updates: Partial<StoreContextType['dailyConsumption']>) => {
@@ -245,7 +279,7 @@ export const StoreProvider = ({ children }: { children: ReactNode }) => {
   const streakDays = computeStreak(eatLog);
 
   return (
-    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, markEaten, eatLog, logMeal, unlogMeal, streakDays, profile, updateProfile, dailyConsumption: todaysConsumption, updateDailyConsumption, isLoading, loadFromCloud, syncToCloud, currentMealPlan, setCurrentMealPlan, planStart }}>
+    <StoreContext.Provider value={{ recipes, setAllRecipes, addRecipe, deleteRecipe, updateRecipe, markEaten, eatLog, logMeal, unlogMeal, streakDays, profile, updateProfile, dailyConsumption: todaysConsumption, updateDailyConsumption, isLoading, token, user, login, register, logout, currentMealPlan, setCurrentMealPlan, planStart }}>
       {children}
     </StoreContext.Provider>
   );

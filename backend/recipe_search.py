@@ -19,9 +19,25 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from diet import DIET_LABELS, avoids
+from diet import DIET_LABELS, avoids, fold
 
-CUISINES = ["internacional", "italiana", "mediterranea", "asiatica", "mexicana", "americana", "india"]
+CUISINES = ["internacional", "italiana", "mediterranea", "asiatica", "mexicana", "americana", "india", "latina", "francesa"]
+# Países/variantes que el pipeline o el usuario escriben -> una de CUISINES.
+CUISINE_ALIASES = {
+    **dict.fromkeys(["china", "japonesa", "coreana", "thai", "tailandesa", "vietnamita", "filipina"], "asiatica"),
+    **dict.fromkeys(["griega", "espanola", "turca", "libanesa", "arabe", "marroqui"], "mediterranea"),
+    **dict.fromkeys(["colombiana", "venezolana", "peruana", "argentina", "cubana", "brasilena"], "latina"),
+    **dict.fromkeys(["cajun", "estadounidense", "tex-mex"], "americana"),
+}
+
+
+def canon_cuisine(value: Optional[str]) -> Optional[str]:
+    """Cocina en su forma única (sin tildes, de CUISINES). Lo desconocido o "fusión" -> internacional."""
+    v = fold(value)
+    if not v:
+        return None
+    v = CUISINE_ALIASES.get(v, v)
+    return v if v in CUISINES else "internacional"
 MEAL_TYPES = ["desayuno", "almuerzo", "cena", "snack", "postre", "bebida"]
 
 
@@ -39,7 +55,7 @@ class SearchFilters(BaseModel):
 
 
 PROMPT = f"""Convierte la búsqueda de recetas del usuario en filtros. Reglas:
-- cocina: SOLO si el usuario nombra una cocina o país (no la deduzcas de un plato: "pasta" no implica italiana). Una de {CUISINES}. "china", "japonesa", "coreana", "thai" -> "asiatica"; "griega", "española" -> "mediterranea".
+- cocina: SOLO si el usuario nombra una cocina o país (no la deduzcas de un plato: "pasta" no implica italiana). Una de {CUISINES}. "china", "japonesa", "coreana", "thai" -> "asiatica"; "griega", "española" -> "mediterranea"; "colombiana", "peruana" -> "latina".
 - tipo_comida: uno de {MEAL_TYPES} solo si lo pide ("algo dulce" -> postre).
 - "sin azúcar" / "bajo en azúcar" -> max_azucar 5. "alto en proteína" / "proteico" -> min_proteina 25. "ligero" / "bajo en calorías" -> max_calorias 400. "rápido" -> max_tiempo_min 20.
 - dietas: de {DIET_LABELS} ("vegano", "sin gluten", "para diabéticos" -> "Apto Diabético").
@@ -77,12 +93,12 @@ def filter_and_rank(results: List[dict], f: SearchFilters) -> List[str]:
     """Aplica en Python lo que Chroma no filtra y, si solo hay texto, corta por similitud."""
     kept = []
     for r in results:
-        tags = {t.strip().lower() for t in (r.get("tags") or "").split(",")}
-        cumple = {d.strip() for d in (r.get("restricciones") or "").split(",")}
+        tags = {fold(t) for t in (r.get("tags") or "").split(",")}
+        cumple = {fold(d) for d in (r.get("restricciones") or "").split(",")}
         texts = [r.get("nombre"), r.get("ingredientes")]
         if f.tipo_comida and f.tipo_comida not in tags:
             continue
-        if any(d not in cumple for d in f.dietas):
+        if any(fold(d) not in cumple for d in f.dietas):
             continue
         # "pollo/chicken": vale cualquiera de las variantes. avoids()=True -> no contiene ninguna.
         if any(avoids(texts, ing.split("/")) for ing in f.incluir_ingredientes):

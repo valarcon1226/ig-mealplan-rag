@@ -91,13 +91,15 @@ function RecipesTab({ recipes, setAllRecipes }: any) {
   // Diet & preferences from the profile: hide what doesn't fit, favorites first.
   const hasDietFilter = !!(profile.dietaryRestrictions?.length || profile.avoidFoods?.length);
   const { filteredRecipes, hiddenCount } = useMemo(() => {
-    const q = search.toLowerCase();
+    // Lowercase without accents, so "albondigas" finds "Albóndigas".
+    const fold = (s: string) => s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+    const q = fold(search);
     const byId = new Map(recipes.map((r: Recipe) => [r.id, r]));
     // AI results come ranked by relevance; otherwise plain text match on title/tags.
     const matching: Recipe[] = ai
       ? ai.ids.map(id => byId.get(id)).filter(Boolean) as Recipe[]
       : recipes.filter((r: Recipe) =>
-          r.title.toLowerCase().includes(q) || r.categories.some((c: string) => c.toLowerCase().includes(q)));
+          fold(r.title).includes(q) || r.categories.some((c: string) => fold(c).includes(q)));
     const fitting = showAll ? matching : matching.filter((r: Recipe) => fitsProfile(r, profile));
     const active = PRESETS.filter(f => presets.includes(f.label));
     const byView = fitting.filter(r => VIEWS[view].keep(r) && active.every(f => f.test(r)));
